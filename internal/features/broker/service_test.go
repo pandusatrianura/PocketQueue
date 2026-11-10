@@ -2,6 +2,7 @@ package broker_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -124,6 +125,95 @@ func TestBrokerService_DLQAndReplay(t *testing.T) {
 	}
 	if len(msgs) != 1 || string(msgs[0].Value) != `{"fixed": true}` {
 		t.Errorf("unexpected message in topic: %+v", msgs)
+	}
+}
+
+func TestBrokerService_MultiPartitionDynamicAllocation(t *testing.T) {
+	ctx := context.Background()
+	engine := storage.NewMemoryEngine(100)
+	bus := broker.NewEventBus(50)
+	svc := broker.NewService(engine, bus, 1)
+	defer svc.Close()
+
+	topic := "events-multi"
+
+	// Produce to partitions 0, 1, 2 dynamically
+	for p := int32(0); p < 3; p++ {
+		key := []byte("key")
+		val := []byte("val")
+		rec, err := svc.Produce(ctx, topic, p, key, val, nil)
+		if err != nil {
+			t.Fatalf("failed to produce to partition %d: %v", p, err)
+		}
+		if rec.Partition != p {
+			t.Errorf("expected partition %d, got %d", p, rec.Partition)
+		}
+	}
+
+	// Topic metadata should dynamically reflect 3 partitions
+	meta, err := svc.GetTopicMetadata(ctx, topic)
+	if err != nil {
+		t.Fatalf("failed to get metadata: %v", err)
+	}
+	if len(meta.Partitions) != 3 {
+		t.Fatalf("expected 3 partitions, got %d", len(meta.Partitions))
+	}
+
+	for p := int32(0); p < 3; p++ {
+		records, err := svc.Fetch(ctx, topic, p, 0, 10)
+		if err != nil {
+			t.Fatalf("failed to fetch from partition %d: %v", p, err)
+		}
+		if len(records) != 1 {
+			t.Errorf("expected 1 record in partition %d, got %d", p, len(records))
+		}
+	}
+
+	// Negative partition should return an error
+	_, err = svc.Produce(ctx, topic, -1, []byte("k"), []byte("v"), nil)
+	if err == nil {
+		t.Errorf("expected error for negative partition produce, got nil")
+	}
+
+	_, err = svc.Fetch(ctx, topic, -1, 0, 10)
+	if err == nil {
+		t.Errorf("expected error for negative partition fetch, got nil")
+	}
+}
+
+func TestBrokerService_PartitionLimitExceeded(t *testing.T) {
+	ctx := context.Background()
+	engine := storage.NewMemoryEngine(100)
+	bus := broker.NewEventBus(10)
+	svc := broker.NewService(engine, bus, 1)
+	defer svc.Close()
+
+	topic := "capped-topic"
+
+	// Partitions 0..15 should succeed
+	for p := int32(0); p < broker.MaxPartitionsPerTopic; p++ {
+		_, err := svc.Produce(ctx, topic, p, []byte("k"), []byte("v"), nil)
+		if err != nil {
+			t.Fatalf("expected partition %d to succeed, got: %v", p, err)
+		}
+	}
+
+	// Partition 16 (MaxPartitionsPerTopic) must be rejected
+	_, err := svc.Produce(ctx, topic, broker.MaxPartitionsPerTopic, []byte("k"), []byte("v"), nil)
+	if err == nil {
+		t.Fatalf("expected error for partition %d exceeding limit, got nil", broker.MaxPartitionsPerTopic)
+	}
+	if !errors.Is(err, broker.ErrPartitionLimitExceeded) {
+		t.Errorf("expected ErrPartitionLimitExceeded, got: %v", err)
+	}
+
+	// Fetch on partition 16 must also be rejected
+	_, err = svc.Fetch(ctx, topic, broker.MaxPartitionsPerTopic, 0, 10)
+	if err == nil {
+		t.Fatalf("expected error for fetch on partition %d, got nil", broker.MaxPartitionsPerTopic)
+	}
+	if !errors.Is(err, broker.ErrPartitionLimitExceeded) {
+		t.Errorf("expected ErrPartitionLimitExceeded, got: %v", err)
 	}
 }
 

@@ -139,13 +139,10 @@ func (m *MemoryEngine) Append(ctx context.Context, topic string, partition int32
 func (m *MemoryEngine) ReadFrom(ctx context.Context, topic string, partition int32, startOffset int64, maxRecords int) ([]Record, error) {
 	m.mu.RLock()
 	parts, exists := m.topics[topic]
-	m.mu.RUnlock()
-
 	if !exists {
+		m.mu.RUnlock()
 		return nil, ErrTopicNotFound
 	}
-
-	m.mu.RLock()
 	pb, exists := parts[partition]
 	m.mu.RUnlock()
 
@@ -160,13 +157,10 @@ func (m *MemoryEngine) ReadFrom(ctx context.Context, topic string, partition int
 func (m *MemoryEngine) GetWatermarks(ctx context.Context, topic string, partition int32) (Watermarks, error) {
 	m.mu.RLock()
 	parts, exists := m.topics[topic]
-	m.mu.RUnlock()
-
 	if !exists {
+		m.mu.RUnlock()
 		return Watermarks{}, ErrTopicNotFound
 	}
-
-	m.mu.RLock()
 	pb, exists := parts[partition]
 	m.mu.RUnlock()
 
@@ -187,6 +181,11 @@ func (m *MemoryEngine) ListTopics(ctx context.Context) (map[string]int32, error)
 		result[topic] = int32(len(parts))
 	}
 	return result, nil
+}
+
+// Sync is a no-op for in-memory storage.
+func (m *MemoryEngine) Sync() error {
+	return nil
 }
 
 // Close shuts down the engine.

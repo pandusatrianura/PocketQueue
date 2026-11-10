@@ -51,6 +51,14 @@ func (h *Handler) HandleRequest(ctx context.Context, header *RequestHeader, body
 		return h.handleOffsetCommit(ctx, header, body)
 	case ApiKeyOffsetFetch:
 		return h.handleOffsetFetch(ctx, header, body)
+	case ApiKeyJoinGroup:
+		return h.handleJoinGroup(ctx, header, body)
+	case ApiKeySyncGroup:
+		return h.handleSyncGroup(ctx, header, body)
+	case ApiKeyHeartbeat:
+		return h.handleHeartbeat(header, body)
+	case ApiKeyLeaveGroup:
+		return h.handleLeaveGroup(header, body)
 	default:
 		h.logger.WarnContext(ctx, "unsupported kafka api key", slog.Int("api_key", int(header.ApiKey)))
 		// Return empty response with correlation ID
@@ -146,8 +154,8 @@ func (h *Handler) handleProduce(ctx context.Context, header *RequestHeader, body
 	if header.ApiVersion >= 3 {
 		_, _ = dec.GetNullableString()
 	}
-	_, _ = dec.GetInt16() // Acks
-	_, _ = dec.GetInt32() // TimeoutMs
+	acks, _ := dec.GetInt16() // Acks (0 = No response expected, 1 = leader ack, -1 = all replicas)
+	_, _ = dec.GetInt32()     // TimeoutMs
 
 	topicsCount, err := dec.GetInt32()
 	if err != nil {
@@ -192,6 +200,11 @@ func (h *Handler) handleProduce(ctx context.Context, header *RequestHeader, body
 			Topic:      topicName,
 			Partitions: partResponses,
 		})
+	}
+
+	// For acks == 0, Kafka clients do not expect any response over the wire
+	if acks == 0 {
+		return nil, nil
 	}
 
 	resp := ProduceResponse{
@@ -425,4 +438,110 @@ func (h *Handler) handleOffsetFetch(ctx context.Context, header *RequestHeader, 
 	}
 
 	return resp.Encode(), nil
+}
+
+func (h *Handler) handleJoinGroup(ctx context.Context, header *RequestHeader, body []byte) ([]byte, error) {
+	dec := NewDecoder(body)
+	req, err := DecodeJoinGroupRequest(dec, header.ApiVersion)
+	if err != nil {
+		h.logger.WarnContext(ctx, "failed to decode join group request", slog.Any("error", err))
+		resp := &JoinGroupResponse{
+			CorrelationId: header.CorrelationId,
+			ErrorCode:     ErrUnknownTopicOrPartition,
+		}
+		return resp.Encode(header.ApiVersion), nil
+	}
+
+	memberID := req.MemberId
+	if memberID == "" {
+		if header.ClientId != "" {
+			memberID = fmt.Sprintf("%s-pq-member", header.ClientId)
+		} else {
+			memberID = "pq-member-1"
+		}
+	}
+
+	chosenProtocol := "roundrobin"
+	var chosenMetadata []byte
+	if len(req.GroupProtocols) > 0 {
+		chosenProtocol = req.GroupProtocols[0].ProtocolName
+		chosenMetadata = req.GroupProtocols[0].ProtocolMetadata
+	}
+
+	resp := &JoinGroupResponse{
+		CorrelationId: header.CorrelationId,
+		ThrottleTime:  0,
+		ErrorCode:     ErrNone,
+		GenerationId:  1,
+		GroupProtocol: chosenProtocol,
+		LeaderId:      memberID,
+		MemberId:      memberID,
+		Members: []JoinGroupMember{
+			{
+				MemberId:       memberID,
+				MemberMetadata: chosenMetadata,
+			},
+		},
+	}
+
+	return resp.Encode(header.ApiVersion), nil
+}
+
+func (h *Handler) handleSyncGroup(ctx context.Context, header *RequestHeader, body []byte) ([]byte, error) {
+	dec := NewDecoder(body)
+	req, err := DecodeSyncGroupRequest(dec, header.ApiVersion)
+	if err != nil {
+		h.logger.WarnContext(ctx, "failed to decode sync group request", slog.Any("error", err))
+		resp := &SyncGroupResponse{
+			CorrelationId: header.CorrelationId,
+			ErrorCode:     ErrUnknownTopicOrPartition,
+		}
+		return resp.Encode(header.ApiVersion), nil
+	}
+
+	// Check if an assignment was provided for this member
+	var memberAssignment []byte
+	for _, a := range req.GroupAssignment {
+		if a.MemberId == req.MemberId && len(a.Assignment) > 0 {
+			memberAssignment = a.Assignment
+			break
+		}
+	}
+
+	// Fallback to default assignment if leader didn't provide raw bytes
+	if len(memberAssignment) == 0 {
+		allTopics, _ := h.broker.ListTopics(ctx)
+		topicList := make([]string, 0, len(allTopics))
+		for t := range allTopics {
+			topicList = append(topicList, t)
+		}
+		memberAssignment = BuildDefaultMemberAssignment(topicList, 1)
+	}
+
+	resp := &SyncGroupResponse{
+		CorrelationId:    header.CorrelationId,
+		ThrottleTime:     0,
+		ErrorCode:        ErrNone,
+		MemberAssignment: memberAssignment,
+	}
+
+	return resp.Encode(header.ApiVersion), nil
+}
+
+func (h *Handler) handleHeartbeat(header *RequestHeader, body []byte) ([]byte, error) {
+	resp := &HeartbeatResponse{
+		CorrelationId: header.CorrelationId,
+		ThrottleTime:  0,
+		ErrorCode:     ErrNone,
+	}
+	return resp.Encode(header.ApiVersion), nil
+}
+
+func (h *Handler) handleLeaveGroup(header *RequestHeader, body []byte) ([]byte, error) {
+	resp := &LeaveGroupResponse{
+		CorrelationId: header.CorrelationId,
+		ThrottleTime:  0,
+		ErrorCode:     ErrNone,
+	}
+	return resp.Encode(header.ApiVersion), nil
 }

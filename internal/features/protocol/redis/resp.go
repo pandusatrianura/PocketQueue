@@ -100,6 +100,11 @@ func EncodeEmptyArray() []byte {
 	return []byte("*0\r\n")
 }
 
+// EncodeNullArray returns "*-1\r\n" (null multi-bulk/nil array).
+func EncodeNullArray() []byte {
+	return []byte("*-1\r\n")
+}
+
 // EncodeStreamEntry formats a single stream entry [id, [field, val, ...]].
 func EncodeStreamEntry(id string, fieldValues [][2]string) []byte {
 	buf := new(bytes.Buffer)

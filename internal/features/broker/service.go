@@ -2,12 +2,20 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/pandusatrianura/pocketqueue/internal/features/storage"
 )
+
+// MaxPartitionsPerTopic limits dynamic partition allocation per topic to prevent
+// OS file descriptor exhaustion from runaway client loops.
+const MaxPartitionsPerTopic int32 = 16
+
+// ErrPartitionLimitExceeded indicates requested partition exceeds the maximum allowable limit.
+var ErrPartitionLimitExceeded = errors.New("partition limit exceeded")
 
 // TopicMetadata holds runtime information about a topic and its partitions.
 type TopicMetadata struct {
@@ -41,33 +49,66 @@ func NewService(engine storage.Engine, eventBus *EventBus, defaultPartitions int
 	if defaultPartitions <= 0 {
 		defaultPartitions = 1
 	}
-	return &Service{
+	svc := &Service{
 		storage:           engine,
 		eventBus:          eventBus,
 		defaultPartitions: defaultPartitions,
 		topics:            make(map[string]int32),
 		groupOffsets:      make(map[string]map[string]map[int32]int64),
 	}
+
+	// Synchronize any pre-existing topics from persistent storage
+	if engine != nil {
+		if existing, err := engine.ListTopics(context.Background()); err == nil && existing != nil {
+			for t, p := range existing {
+				svc.topics[t] = p
+			}
+		}
+	}
+
+	return svc
 }
 
-// EnsureTopic guarantees a topic exists with at least the default number of partitions.
+// EventBus returns the active EventBus instance for real-time pub/sub notifications.
+func (s *Service) EventBus() *EventBus {
+	return s.eventBus
+}
+
+// EnsureTopic guarantees a topic exists with at least the requested number of partitions.
 func (s *Service) EnsureTopic(topic string, partitions int32) int32 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if cur, exists := s.topics[topic]; exists {
-		return cur
-	}
-
 	if partitions <= 0 {
 		partitions = s.defaultPartitions
 	}
-	s.topics[topic] = partitions
-	return partitions
+	if partitions > MaxPartitionsPerTopic {
+		partitions = MaxPartitionsPerTopic
+	}
+
+	cur, exists := s.topics[topic]
+	if !exists {
+		s.topics[topic] = partitions
+		return partitions
+	}
+
+	if partitions > cur {
+		s.topics[topic] = partitions
+		return partitions
+	}
+
+	return cur
 }
 
 // Produce appends a record to the specified topic partition and broadcasts it to the EventBus.
 func (s *Service) Produce(ctx context.Context, topic string, partition int32, key, value []byte, headers []storage.Header) (*storage.Record, error) {
+	if partition < 0 {
+		return nil, fmt.Errorf("invalid partition %d: partition must be non-negative", partition)
+	}
+	if partition >= MaxPartitionsPerTopic {
+		return nil, fmt.Errorf("%w: partition %d exceeds maximum limit of %d", ErrPartitionLimitExceeded, partition, MaxPartitionsPerTopic)
+	}
+
 	s.EnsureTopic(topic, partition+1)
 
 	rec, err := s.storage.Append(ctx, topic, partition, key, value, headers)
@@ -84,11 +125,24 @@ func (s *Service) Produce(ctx context.Context, topic string, partition int32, ke
 
 // Fetch retrieves records starting from startOffset up to maxRecords.
 func (s *Service) Fetch(ctx context.Context, topic string, partition int32, startOffset int64, maxRecords int) ([]storage.Record, error) {
+	if partition < 0 {
+		return nil, fmt.Errorf("invalid partition %d: partition must be non-negative", partition)
+	}
+	if partition >= MaxPartitionsPerTopic {
+		return nil, fmt.Errorf("%w: partition %d exceeds maximum limit of %d", ErrPartitionLimitExceeded, partition, MaxPartitionsPerTopic)
+	}
 	return s.storage.ReadFrom(ctx, topic, partition, startOffset, maxRecords)
 }
 
 // CommitOffset updates the committed offset for a consumer group.
 func (s *Service) CommitOffset(ctx context.Context, groupID, topic string, partition int32, offset int64) error {
+	if partition < 0 {
+		return fmt.Errorf("invalid partition %d: partition must be non-negative", partition)
+	}
+	if partition >= MaxPartitionsPerTopic {
+		return fmt.Errorf("%w: partition %d exceeds maximum limit of %d", ErrPartitionLimitExceeded, partition, MaxPartitionsPerTopic)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -110,6 +164,13 @@ func (s *Service) CommitOffset(ctx context.Context, groupID, topic string, parti
 
 // GetOffset retrieves the committed offset for a consumer group. Returns -1 if not committed.
 func (s *Service) GetOffset(ctx context.Context, groupID, topic string, partition int32) (int64, error) {
+	if partition < 0 {
+		return -1, fmt.Errorf("invalid partition %d: partition must be non-negative", partition)
+	}
+	if partition >= MaxPartitionsPerTopic {
+		return -1, fmt.Errorf("%w: partition %d exceeds maximum limit of %d", ErrPartitionLimitExceeded, partition, MaxPartitionsPerTopic)
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -226,6 +287,10 @@ func (s *Service) Close() error {
 	if s.eventBus != nil {
 		s.eventBus.Close()
 	}
-	return s.storage.Close()
+	if s.storage != nil {
+		_ = s.storage.Sync()
+		return s.storage.Close()
+	}
+	return nil
 }
 

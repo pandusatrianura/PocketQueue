@@ -61,6 +61,9 @@ type Engine interface {
 	// ListTopics returns a map of existing topic names and their partition counts.
 	ListTopics(ctx context.Context) (map[string]int32, error)
 
+	// Sync flushes pending data buffers to disk/storage.
+	Sync() error
+
 	// Close shuts down the engine and releases resources.
 	Close() error
 }

@@ -292,6 +292,19 @@ PocketQueue is designed following strict **I/O Isolation** and the vertical slic
 
 ---
 
+## 🛡️ Engineering Doctrine & Triage Framework
+
+PocketQueue enforces the **3-Tier Pre-Implementation Triage & Developer Tooling Integrity Framework** before adding any feature or refactoring code:
+- **Hukum Rework Multiplier**: 15 minutes of structured failure-mode analysis saves 2–3 hours of downstream debugging.
+- **Categorization Gate**:
+  - 🔴 **Must Handle Now**: Non-negotiable blockers (TCP framing bounds, port clash guidance, graceful `file.Sync()` on SIGINT/SIGTERM).
+  - 🟡 **Defensive Default**: Pragmatic fallbacks (dynamic partition cap of 16, WAL 100 MB file cap, 30 FPS UI render throttling).
+  - 🟢 **Explicitly Ignored**: Consciously rejected complexities (no SASL/TLS, no Raft clustering, no 2-PC transactions) to keep the binary **< 15 MB** and RAM **< 25 MB**.
+
+📖 Read the full architecture document: [docs/architecture/triage-framework.md](docs/architecture/triage-framework.md)
+
+---
+
 ## 🛠️ Contributing
 
 Contributions are welcome! Adding new capabilities is designed to be frictionless:

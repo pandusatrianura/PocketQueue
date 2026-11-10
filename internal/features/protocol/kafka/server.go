@@ -8,9 +8,40 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
+
+// MaxFrameSize limits the maximum allowable Kafka request frame size (16 MB)
+// to prevent denial-of-service and out-of-memory crashes on malformed packets.
+const MaxFrameSize = 16 * 1024 * 1024
+
+// ErrPortInUse indicates the configured network port is already occupied.
+var ErrPortInUse = errors.New("port already in use")
+
+func isPortInUse(err error) bool {
+	if err == nil {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		var sysErr *os.SyscallError
+		if errors.As(opErr.Err, &sysErr) {
+			if errno, ok := sysErr.Err.(syscall.Errno); ok {
+				if errno == 10048 || errno == 98 || errno == 48 {
+					return true
+				}
+			}
+		}
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "address already in use") ||
+		strings.Contains(errStr, "wsaeaddrinuse") ||
+		strings.Contains(errStr, "only one usage of each socket address")
+}
 
 // Server represents the Kafka wire-compatible TCP server.
 type Server struct {
@@ -45,6 +76,9 @@ func NewServer(addr string, handler *Handler, logger *slog.Logger) *Server {
 func (s *Server) Start() error {
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
+		if isPortInUse(err) {
+			return fmt.Errorf("%w: %s", ErrPortInUse, s.addr)
+		}
 		return fmt.Errorf("kafka server listen on %s: %w", s.addr, err)
 	}
 
@@ -121,8 +155,11 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 
 		msgLength := int(binary.BigEndian.Uint32(lengthBuf[:]))
-		if msgLength <= 0 || msgLength > 32*1024*1024 { // max 32MB frame
-			s.logger.Warn("invalid kafka frame length", slog.Int("length", msgLength))
+		if msgLength <= 0 || msgLength > MaxFrameSize {
+			s.logger.Warn("invalid kafka frame length, closing connection",
+				slog.Int("length", msgLength),
+				slog.Int("max_allowed", MaxFrameSize),
+			)
 			return
 		}
 
@@ -156,6 +193,11 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 
 		// 5. Send response: [4-byte length prefix][response bytes]
+		// For acks == 0, Kafka clients do not expect any response over the wire
+		if respBytes == nil {
+			continue
+		}
+
 		var respLenBuf [4]byte
 		binary.BigEndian.PutUint32(respLenBuf[:], uint32(len(respBytes)))
 

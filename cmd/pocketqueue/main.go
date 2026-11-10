@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -72,6 +73,7 @@ func main() {
 
 	bus := broker.NewEventBus(1000)
 	brokerSvc := broker.NewService(engine, bus, 1)
+	defer brokerSvc.Close()
 
 	// If --demo is requested, start background demo event generator
 	if cfg.WithDemo {
@@ -86,7 +88,11 @@ func main() {
 		handler := kafka.NewHandler(brokerSvc, cfg.Host, int32(cfg.Port), nil)
 		kafkaServer = kafka.NewServer(listenAddr, handler, nil)
 		if err := kafkaServer.Start(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error starting Kafka protocol server: %v\n", err)
+			if errors.Is(err, kafka.ErrPortInUse) {
+				fmt.Fprintf(os.Stderr, "\n❌ Kafka port %d is already in use by another process (e.g. Docker Kafka/local service).\n   👉 Use --port <alt> to specify a different port (e.g. --port 9094)\n\n", cfg.Port)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error starting Kafka protocol server: %v\n", err)
+			}
 			os.Exit(1)
 		}
 		defer kafkaServer.Close()
@@ -98,7 +104,11 @@ func main() {
 		redisAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.RedisPort)
 		redisServer = redis.NewServer(redisAddr, brokerSvc, nil)
 		if err := redisServer.Start(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error starting Redis Streams protocol server: %v\n", err)
+			if errors.Is(err, redis.ErrPortInUse) {
+				fmt.Fprintf(os.Stderr, "\n❌ Redis port %d is already in use by another process (e.g. Docker Redis/local service).\n   👉 Use --redis-port <alt> to specify a different port (e.g. --redis-port 6380)\n\n", cfg.RedisPort)
+			} else {
+				fmt.Fprintf(os.Stderr, "Error starting Redis Streams protocol server: %v\n", err)
+			}
 			os.Exit(1)
 		}
 		defer redisServer.Close()

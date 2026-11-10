@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,13 @@ import (
 	"sync"
 	"time"
 )
+
+// DefaultMaxWALFileSize sets the default safety threshold (100 MB per partition) to avoid
+// filling local developer hard disks.
+const DefaultMaxWALFileSize int64 = 100 * 1024 * 1024
+
+// ErrWALFileSizeLimitExceeded is returned when a WAL partition file reaches its maximum capacity.
+var ErrWALFileSizeLimitExceeded = errors.New("wal file size limit exceeded")
 
 type walIndexEntry struct {
 	offset   int64
@@ -24,12 +32,13 @@ type walPartition struct {
 	partition   int32
 	file        *os.File
 	filePath    string
+	maxFileSize int64
 	index       []walIndexEntry
 	startOffset int64
 	nextOffset  int64
 }
 
-func newWALPartition(dir, topic string, partition int32) (*walPartition, error) {
+func newWALPartition(dir, topic string, partition int32, maxFileSize int64) (*walPartition, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("create data dir %s: %w", dir, err)
 	}
@@ -42,12 +51,17 @@ func newWALPartition(dir, topic string, partition int32) (*walPartition, error) 
 		return nil, fmt.Errorf("open wal file %s: %w", filePath, err)
 	}
 
+	if maxFileSize <= 0 {
+		maxFileSize = DefaultMaxWALFileSize
+	}
+
 	wp := &walPartition{
-		topic:     topic,
-		partition: partition,
-		file:      file,
-		filePath:  filePath,
-		index:     make([]walIndexEntry, 0),
+		topic:       topic,
+		partition:   partition,
+		file:        file,
+		filePath:    filePath,
+		maxFileSize: maxFileSize,
+		index:       make([]walIndexEntry, 0),
 	}
 
 	// Replay WAL index from disk
@@ -77,12 +91,18 @@ func (wp *walPartition) recover() error {
 	var lenBuf [4]byte
 
 	for pos < stat.Size() {
+		// Guard against partial length prefix at EOF
+		if pos+4 > stat.Size() {
+			break
+		}
+
 		_, err := io.ReadFull(wp.file, lenBuf[:])
 		if err != nil {
 			break
 		}
 		recordLen := int32(binary.BigEndian.Uint32(lenBuf[:]))
-		if recordLen <= 0 {
+		if recordLen <= 0 || pos+int64(recordLen+4) > stat.Size() {
+			// Incomplete or corrupted record frame
 			break
 		}
 
@@ -105,8 +125,16 @@ func (wp *walPartition) recover() error {
 		}
 		wp.nextOffset = offset + 1
 
-		// Seek to next record
+		// Advance to next record position
 		pos += int64(recordLen + 4)
+		_, _ = wp.file.Seek(pos, io.SeekStart)
+	}
+
+	// Truncate any incomplete or corrupted trailing bytes to preserve clean frame boundary
+	if pos < stat.Size() {
+		if err := wp.file.Truncate(pos); err != nil {
+			return fmt.Errorf("truncate corrupted wal tail: %w", err)
+		}
 		_, _ = wp.file.Seek(pos, io.SeekStart)
 	}
 
@@ -173,6 +201,11 @@ func (wp *walPartition) append(key, value []byte, headers []Header) (*Record, er
 		return nil, err
 	}
 	filePos := stat.Size()
+
+	if wp.maxFileSize > 0 && filePos+int64(len(buf)) > wp.maxFileSize {
+		return nil, fmt.Errorf("%w: partition %s_%d reached maximum size of %d bytes",
+			ErrWALFileSizeLimitExceeded, wp.topic, wp.partition, wp.maxFileSize)
+	}
 
 	if _, err := wp.file.WriteAt(buf, filePos); err != nil {
 		return nil, fmt.Errorf("write wal: %w", err)
@@ -285,6 +318,15 @@ func (wp *walPartition) watermarks() Watermarks {
 	}
 }
 
+func (wp *walPartition) sync() error {
+	wp.mu.Lock()
+	defer wp.mu.Unlock()
+	if wp.file != nil {
+		return wp.file.Sync()
+	}
+	return nil
+}
+
 func (wp *walPartition) close() error {
 	wp.mu.Lock()
 	defer wp.mu.Unlock()
@@ -296,21 +338,27 @@ func (wp *walPartition) close() error {
 
 // WALEngine is a persistent append-only Write-Ahead Log implementation of Engine.
 type WALEngine struct {
-	mu         sync.RWMutex
-	dir        string
-	partitions map[string]map[int32]*walPartition
-	closed     bool
+	mu          sync.RWMutex
+	dir         string
+	maxFileSize int64
+	partitions  map[string]map[int32]*walPartition
+	closed      bool
 }
 
-// NewWALEngine initializes a WAL engine storing partition logs in dataDir.
-func NewWALEngine(dataDir string) (*WALEngine, error) {
+// NewWALEngineWithLimit initializes a WAL engine storing partition logs in dataDir with custom file size cap.
+func NewWALEngineWithLimit(dataDir string, maxFileSize int64) (*WALEngine, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("create wal dir: %w", err)
 	}
 
+	if maxFileSize <= 0 {
+		maxFileSize = DefaultMaxWALFileSize
+	}
+
 	engine := &WALEngine{
-		dir:        dataDir,
-		partitions: make(map[string]map[int32]*walPartition),
+		dir:         dataDir,
+		maxFileSize: maxFileSize,
+		partitions:  make(map[string]map[int32]*walPartition),
 	}
 
 	// Discover existing .wal files
@@ -325,7 +373,7 @@ func NewWALEngine(dataDir string) (*WALEngine, error) {
 					var partID int32
 					_, err := fmt.Sscanf(base[idx+1:], "%d", &partID)
 					if err == nil {
-						wp, err := newWALPartition(dataDir, topic, partID)
+						wp, err := newWALPartition(dataDir, topic, partID, maxFileSize)
 						if err == nil {
 							if engine.partitions[topic] == nil {
 								engine.partitions[topic] = make(map[int32]*walPartition)
@@ -341,6 +389,11 @@ func NewWALEngine(dataDir string) (*WALEngine, error) {
 	return engine, nil
 }
 
+// NewWALEngine initializes a WAL engine storing partition logs in dataDir.
+func NewWALEngine(dataDir string) (*WALEngine, error) {
+	return NewWALEngineWithLimit(dataDir, DefaultMaxWALFileSize)
+}
+
 func (w *WALEngine) getOrCreatePartition(topic string, partition int32) (*walPartition, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -354,7 +407,7 @@ func (w *WALEngine) getOrCreatePartition(topic string, partition int32) (*walPar
 	wp, exists := parts[partition]
 	if !exists {
 		var err error
-		wp, err = newWALPartition(w.dir, topic, partition)
+		wp, err = newWALPartition(w.dir, topic, partition, w.maxFileSize)
 		if err != nil {
 			return nil, err
 		}
@@ -377,13 +430,10 @@ func (w *WALEngine) Append(ctx context.Context, topic string, partition int32, k
 func (w *WALEngine) ReadFrom(ctx context.Context, topic string, partition int32, startOffset int64, maxRecords int) ([]Record, error) {
 	w.mu.RLock()
 	parts, exists := w.partitions[topic]
-	w.mu.RUnlock()
-
 	if !exists {
+		w.mu.RUnlock()
 		return nil, ErrTopicNotFound
 	}
-
-	w.mu.RLock()
 	wp, exists := parts[partition]
 	w.mu.RUnlock()
 
@@ -398,13 +448,10 @@ func (w *WALEngine) ReadFrom(ctx context.Context, topic string, partition int32,
 func (w *WALEngine) GetWatermarks(ctx context.Context, topic string, partition int32) (Watermarks, error) {
 	w.mu.RLock()
 	parts, exists := w.partitions[topic]
-	w.mu.RUnlock()
-
 	if !exists {
+		w.mu.RUnlock()
 		return Watermarks{}, ErrTopicNotFound
 	}
-
-	w.mu.RLock()
 	wp, exists := parts[partition]
 	w.mu.RUnlock()
 
@@ -427,7 +474,23 @@ func (w *WALEngine) ListTopics(ctx context.Context) (map[string]int32, error) {
 	return result, nil
 }
 
-// Close closes all open WAL file descriptors.
+// Sync flushes all open WAL partition files to physical disk.
+func (w *WALEngine) Sync() error {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	var firstErr error
+	for _, parts := range w.partitions {
+		for _, wp := range parts {
+			if err := wp.sync(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
+// Close syncs and closes all open WAL file descriptors.
 func (w *WALEngine) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -436,6 +499,7 @@ func (w *WALEngine) Close() error {
 	var firstErr error
 	for _, parts := range w.partitions {
 		for _, wp := range parts {
+			_ = wp.sync()
 			if err := wp.close(); err != nil && firstErr == nil {
 				firstErr = err
 			}

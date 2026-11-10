@@ -9,13 +9,39 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/pandusatrianura/pocketqueue/internal/features/broker"
 )
+
+// ErrPortInUse indicates the configured network port is already occupied.
+var ErrPortInUse = errors.New("port already in use")
+
+func isPortInUse(err error) bool {
+	if err == nil {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		var sysErr *os.SyscallError
+		if errors.As(opErr.Err, &sysErr) {
+			if errno, ok := sysErr.Err.(syscall.Errno); ok {
+				if errno == 10048 || errno == 98 || errno == 48 {
+					return true
+				}
+			}
+		}
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "address already in use") ||
+		strings.Contains(errStr, "wsaeaddrinuse") ||
+		strings.Contains(errStr, "only one usage of each socket address")
+}
 
 // Server implements a Redis Streams RESP wire-compatible TCP server.
 type Server struct {
@@ -50,6 +76,9 @@ func NewServer(addr string, b *broker.Service, l *slog.Logger) *Server {
 func (s *Server) Start() error {
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
+		if isPortInUse(err) {
+			return fmt.Errorf("%w: %s", ErrPortInUse, s.addr)
+		}
 		return fmt.Errorf("redis server listen on %s: %w", s.addr, err)
 	}
 
@@ -114,6 +143,11 @@ func (s *Server) handleConnection(conn net.Conn) {
 			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 				return
 			}
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				// Keep connection alive on idle timeout, check context for cancellation
+				continue
+			}
 			return
 		}
 		if len(args) == 0 {
@@ -126,6 +160,11 @@ func (s *Server) handleConnection(conn net.Conn) {
 			return
 		}
 		if err := writer.Flush(); err != nil {
+			return
+		}
+
+		// Clean client disconnect on QUIT
+		if strings.ToUpper(args[0]) == "QUIT" {
 			return
 		}
 	}
@@ -145,6 +184,9 @@ func (s *Server) executeCommand(args []string) []byte {
 		return EncodeEmptyArray()
 
 	case "CLIENT":
+		return EncodeSimpleString("OK")
+
+	case "QUIT":
 		return EncodeSimpleString("OK")
 
 	case "INFO":
@@ -255,7 +297,7 @@ func (s *Server) executeCommand(args []string) []byte {
 		return []byte(out.String())
 
 	case "XREAD":
-		// Format: XREAD [COUNT n] STREAMS stream1 ... offset1 ...
+		// Format: XREAD [COUNT n] [BLOCK ms] STREAMS stream1 ... offset1 ...
 		streamIdx := -1
 		for i, a := range args {
 			if strings.ToUpper(a) == "STREAMS" {
@@ -267,24 +309,83 @@ func (s *Server) executeCommand(args []string) []byte {
 			return EncodeError("syntax error in 'xread' command")
 		}
 
+		count := 50
+		var blockMs int64 = -1
+		for i := 1; i+1 < streamIdx; i++ {
+			switch strings.ToUpper(args[i]) {
+			case "COUNT":
+				if c, err := strconv.Atoi(args[i+1]); err == nil && c > 0 {
+					count = c
+				}
+			case "BLOCK":
+				if ms, err := strconv.ParseInt(args[i+1], 10, 64); err == nil && ms >= 0 {
+					blockMs = ms
+				}
+			}
+		}
+
 		streamsPart := args[streamIdx+1:]
 		numStreams := len(streamsPart) / 2
 		if numStreams <= 0 {
-			return EncodeEmptyArray()
+			return EncodeNullArray()
 		}
 
 		streamName := streamsPart[0]
 		offsetStr := streamsPart[numStreams]
 		var startOffset int64 = 0
-		if offsetStr != "0" && offsetStr != "$" {
+		if offsetStr == "$" {
+			meta, err := s.broker.GetTopicMetadata(s.ctx, streamName)
+			if err == nil && len(meta.Partitions) > 0 {
+				startOffset = meta.Partitions[0].Latest
+			} else {
+				startOffset = 0
+			}
+		} else if offsetStr != "0" {
 			sParts := strings.Split(offsetStr, "-")
 			parsed, _ := strconv.ParseInt(sParts[0], 10, 64)
 			startOffset = parsed + 1 // XREAD returns strictly greater than ID
 		}
 
-		records, _ := s.broker.Fetch(s.ctx, streamName, 0, startOffset, 50)
+		records, _ := s.broker.Fetch(s.ctx, streamName, 0, startOffset, count)
+		if len(records) == 0 && blockMs >= 0 {
+			bus := s.broker.EventBus()
+			if bus != nil {
+				subCh, unsub := bus.Subscribe()
+				defer unsub()
+
+				var timeoutCh <-chan time.Time
+				if blockMs > 0 {
+					timer := time.NewTimer(time.Duration(blockMs) * time.Millisecond)
+					defer timer.Stop()
+					timeoutCh = timer.C
+				}
+
+			waitLoop:
+				for {
+					select {
+					case <-s.ctx.Done():
+						return EncodeNullArray()
+					case <-timeoutCh:
+						return EncodeNullArray()
+					case rec, ok := <-subCh:
+						if !ok {
+							return EncodeNullArray()
+						}
+						if rec.Topic == streamName && rec.Partition == 0 && rec.Offset >= startOffset {
+							records = append(records, rec)
+							if count > 1 {
+								extra, _ := s.broker.Fetch(s.ctx, streamName, 0, rec.Offset+1, count-1)
+								records = append(records, extra...)
+							}
+							break waitLoop
+						}
+					}
+				}
+			}
+		}
+
 		if len(records) == 0 {
-			return EncodeEmptyArray()
+			return EncodeNullArray()
 		}
 
 		entries := make([][]byte, 0, len(records))

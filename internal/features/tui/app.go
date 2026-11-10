@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -60,6 +61,7 @@ type AppModel struct {
 	selectedMsg *storage.Record
 	replayText  textarea.Model
 	statusMsg   string
+	lastRefresh time.Time
 }
 
 // NewAppModel creates a new Bubbletea model connected to the broker.
@@ -166,7 +168,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.updateSizes()
+		if m.width >= 40 && m.height >= 10 {
+			m.updateSizes()
+		}
 
 	case recordArrivedMsg:
 		rec := storage.Record(msg)
@@ -175,8 +179,16 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.messages = append(m.messages, rec)
 		}
-		m.refreshStreamRows()
-		m.refreshTopicRows()
+
+		// Throttle table view recalculation under rapid bursts (>30 FPS / 33ms or batch of 25)
+		now := time.Now()
+		if now.Sub(m.lastRefresh) >= 33*time.Millisecond || len(m.messages)%25 == 0 {
+			m.refreshStreamRows()
+			if m.activeTab == tabTopics {
+				m.refreshTopicRows()
+			}
+			m.lastRefresh = now
+		}
 		return m, m.waitForNextRecord()
 
 	case tea.KeyMsg:
@@ -197,8 +209,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if msg.String() == "ctrl+s" {
-				m.executeReplay()
-				m.modal = modalNone
+				if m.executeReplay() {
+					m.modal = modalNone
+				}
 				return m, nil
 			}
 			var taCmd tea.Cmd
@@ -218,6 +231,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.refreshTopicRows()
 				} else {
 					m.activeTab = tabStream
+					m.refreshStreamRows()
 				}
 				return m, nil
 			case "enter":
@@ -355,23 +369,54 @@ func (m *AppModel) openReplayModal() {
 	}
 }
 
-func (m *AppModel) executeReplay() {
+func (m *AppModel) executeReplay() bool {
 	if m.selectedMsg == nil || m.broker == nil {
-		return
+		return false
 	}
 	targetTopic := strings.TrimSuffix(m.selectedMsg.Topic, ".dlq")
-	newPayload := []byte(m.replayText.Value())
+	rawText := strings.TrimSpace(m.replayText.Value())
+	newPayload := []byte(rawText)
+
+	// Validate JSON syntax if input appears to be a JSON object or array
+	if len(newPayload) > 0 && (newPayload[0] == '{' || newPayload[0] == '[') {
+		if !json.Valid(newPayload) {
+			m.statusMsg = "❌ Malformed JSON syntax - fix payload before replay"
+			return false
+		}
+	}
 
 	_, err := m.broker.Replay(context.Background(), targetTopic, m.selectedMsg.Partition, m.selectedMsg.Key, newPayload, m.selectedMsg.Headers)
 	if err != nil {
 		m.statusMsg = fmt.Sprintf("❌ Replay failed: %v", err)
-	} else {
-		m.statusMsg = fmt.Sprintf("✅ Replayed to topic %s at %s", targetTopic, time.Now().Format("15:04:05"))
+		return false
 	}
+
+	m.statusMsg = fmt.Sprintf("✅ Replayed to topic %s at %s", targetTopic, time.Now().Format("15:04:05"))
+	return true
+}
+
+func isBinaryData(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	nonPrintable := 0
+	for _, c := range b {
+		if c == 0 {
+			return true
+		}
+		if (c < 32 && c != '\n' && c != '\r' && c != '\t') || c == 0x7F {
+			nonPrintable++
+		}
+	}
+	return float64(nonPrintable)/float64(len(b)) > 0.05
 }
 
 // View renders the TUI interface.
 func (m *AppModel) View() string {
+	if m.width > 0 && (m.width < 40 || m.height < 10) {
+		return fmt.Sprintf("Terminal window too small (%dx%d).\nMinimum required: 40x10.", m.width, m.height)
+	}
+
 	var sb strings.Builder
 
 	// 1. Header Bar
@@ -431,11 +476,16 @@ func (m *AppModel) renderInspectModal() string {
 		return ""
 	}
 
-	var jsonPretty bytes.Buffer
-	if err := json.Indent(&jsonPretty, m.selectedMsg.Value, "", "  "); err == nil {
-		// Pretty json
+	var payloadDisplay string
+	if isBinaryData(m.selectedMsg.Value) {
+		payloadDisplay = fmt.Sprintf("[Binary Data - %d bytes]\n\n%s", len(m.selectedMsg.Value), hex.Dump(m.selectedMsg.Value))
 	} else {
-		jsonPretty.Write(m.selectedMsg.Value)
+		var jsonPretty bytes.Buffer
+		if err := json.Indent(&jsonPretty, m.selectedMsg.Value, "", "  "); err == nil {
+			payloadDisplay = jsonPretty.String()
+		} else {
+			payloadDisplay = string(m.selectedMsg.Value)
+		}
 	}
 
 	headersStr := "-"
@@ -455,7 +505,7 @@ func (m *AppModel) renderInspectModal() string {
 		m.selectedMsg.Timestamp.Format(time.RFC3339),
 		string(m.selectedMsg.Key),
 		headersStr,
-		jsonPretty.String(),
+		payloadDisplay,
 	)
 
 	return StyleModal.Render(content)
@@ -467,8 +517,15 @@ func (m *AppModel) renderReplayModal() string {
 	}
 
 	targetTopic := strings.TrimSuffix(m.selectedMsg.Topic, ".dlq")
-	header := fmt.Sprintf("REPLAY STUDIO (Target Topic: %s)\nEdit payload and press Ctrl+S to republish:\n\n", targetTopic)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("REPLAY STUDIO (Target Topic: %s)\nEdit payload and press Ctrl+S to republish:\n\n", targetTopic))
 
-	return StyleModal.Render(header + m.replayText.View())
+	if strings.HasPrefix(m.statusMsg, "❌") {
+		errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555")).Bold(true)
+		sb.WriteString(errStyle.Render(m.statusMsg) + "\n\n")
+	}
+
+	sb.WriteString(m.replayText.View())
+	return StyleModal.Render(sb.String())
 }
 

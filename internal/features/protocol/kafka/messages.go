@@ -99,6 +99,10 @@ func BuildApiVersionsResponse(correlationId int32) *ApiVersionsResponse {
 			{ApiKey: ApiKeyOffsetCommit, MinVersion: 0, MaxVersion: 8},
 			{ApiKey: ApiKeyOffsetFetch, MinVersion: 0, MaxVersion: 6},
 			{ApiKey: ApiKeyFindCoordinator, MinVersion: 0, MaxVersion: 2},
+			{ApiKey: ApiKeyJoinGroup, MinVersion: 0, MaxVersion: 2},
+			{ApiKey: ApiKeyHeartbeat, MinVersion: 0, MaxVersion: 2},
+			{ApiKey: ApiKeyLeaveGroup, MinVersion: 0, MaxVersion: 2},
+			{ApiKey: ApiKeySyncGroup, MinVersion: 0, MaxVersion: 2},
 			{ApiKey: ApiKeyApiVersions, MinVersion: 0, MaxVersion: 3},
 		},
 	}
@@ -587,5 +591,254 @@ func (r *FetchResponse) Encode() []byte {
 			enc.PutBytes(p.RecordBatch)
 		}
 	}
+	return buf.Bytes()
+}
+
+// GroupProtocol holds consumer group protocol name and metadata.
+type GroupProtocol struct {
+	ProtocolName     string
+	ProtocolMetadata []byte
+}
+
+// JoinGroupRequest parses a JoinGroup request.
+type JoinGroupRequest struct {
+	GroupId          string
+	SessionTimeout   int32
+	RebalanceTimeout int32
+	MemberId         string
+	ProtocolType     string
+	GroupProtocols   []GroupProtocol
+}
+
+// DecodeJoinGroupRequest parses the JoinGroup body based on API version.
+func DecodeJoinGroupRequest(d *Decoder, apiVersion int16) (*JoinGroupRequest, error) {
+	gid, err := d.GetString()
+	if err != nil {
+		return nil, fmt.Errorf("read GroupId: %w", err)
+	}
+	sessionTimeout, err := d.GetInt32()
+	if err != nil {
+		return nil, fmt.Errorf("read SessionTimeout: %w", err)
+	}
+	var rebalanceTimeout int32
+	if apiVersion >= 1 {
+		rebalanceTimeout, err = d.GetInt32()
+		if err != nil {
+			return nil, fmt.Errorf("read RebalanceTimeout: %w", err)
+		}
+	}
+	memberId, err := d.GetString()
+	if err != nil {
+		return nil, fmt.Errorf("read MemberId: %w", err)
+	}
+	protocolType, err := d.GetString()
+	if err != nil {
+		return nil, fmt.Errorf("read ProtocolType: %w", err)
+	}
+	protoCount, err := d.GetInt32()
+	if err != nil {
+		return nil, fmt.Errorf("read GroupProtocols count: %w", err)
+	}
+	protocols := make([]GroupProtocol, 0, protoCount)
+	for i := 0; i < int(protoCount); i++ {
+		pName, err := d.GetString()
+		if err != nil {
+			return nil, fmt.Errorf("read ProtocolName: %w", err)
+		}
+		pMeta, err := d.GetBytes()
+		if err != nil {
+			return nil, fmt.Errorf("read ProtocolMetadata: %w", err)
+		}
+		protocols = append(protocols, GroupProtocol{
+			ProtocolName:     pName,
+			ProtocolMetadata: pMeta,
+		})
+	}
+	return &JoinGroupRequest{
+		GroupId:          gid,
+		SessionTimeout:   sessionTimeout,
+		RebalanceTimeout: rebalanceTimeout,
+		MemberId:         memberId,
+		ProtocolType:     protocolType,
+		GroupProtocols:   protocols,
+	}, nil
+}
+
+// JoinGroupMember represents a member returned to group leader.
+type JoinGroupMember struct {
+	MemberId       string
+	MemberMetadata []byte
+}
+
+// JoinGroupResponse represents the response to JoinGroup request.
+type JoinGroupResponse struct {
+	CorrelationId int32
+	ThrottleTime  int32
+	ErrorCode     int16
+	GenerationId  int32
+	GroupProtocol string
+	LeaderId      string
+	MemberId      string
+	Members       []JoinGroupMember
+}
+
+// Encode serializes the JoinGroup response into bytes.
+func (r *JoinGroupResponse) Encode(apiVersion int16) []byte {
+	buf := new(bytes.Buffer)
+	enc := NewEncoder(buf)
+
+	enc.PutInt32(r.CorrelationId)
+	if apiVersion >= 2 {
+		enc.PutInt32(r.ThrottleTime)
+	}
+	enc.PutInt16(r.ErrorCode)
+	enc.PutInt32(r.GenerationId)
+	enc.PutString(r.GroupProtocol)
+	enc.PutString(r.LeaderId)
+	enc.PutString(r.MemberId)
+
+	enc.PutInt32(int32(len(r.Members)))
+	for _, m := range r.Members {
+		enc.PutString(m.MemberId)
+		enc.PutBytes(m.MemberMetadata)
+	}
+
+	return buf.Bytes()
+}
+
+// GroupMemberAssignment maps a group member to assigned partition bytes.
+type GroupMemberAssignment struct {
+	MemberId   string
+	Assignment []byte
+}
+
+// SyncGroupRequest represents a SyncGroup request.
+type SyncGroupRequest struct {
+	GroupId         string
+	GenerationId    int32
+	MemberId        string
+	GroupAssignment []GroupMemberAssignment
+}
+
+// DecodeSyncGroupRequest parses the SyncGroup request.
+func DecodeSyncGroupRequest(d *Decoder, apiVersion int16) (*SyncGroupRequest, error) {
+	gid, err := d.GetString()
+	if err != nil {
+		return nil, fmt.Errorf("read GroupId: %w", err)
+	}
+	genId, err := d.GetInt32()
+	if err != nil {
+		return nil, fmt.Errorf("read GenerationId: %w", err)
+	}
+	memberId, err := d.GetString()
+	if err != nil {
+		return nil, fmt.Errorf("read MemberId: %w", err)
+	}
+	assignCount, err := d.GetInt32()
+	if err != nil {
+		return nil, fmt.Errorf("read GroupAssignment count: %w", err)
+	}
+	assignments := make([]GroupMemberAssignment, 0, assignCount)
+	for i := 0; i < int(assignCount); i++ {
+		mId, err := d.GetString()
+		if err != nil {
+			return nil, fmt.Errorf("read MemberId in assignment: %w", err)
+		}
+		assignBytes, err := d.GetBytes()
+		if err != nil {
+			return nil, fmt.Errorf("read MemberAssignment bytes: %w", err)
+		}
+		assignments = append(assignments, GroupMemberAssignment{
+			MemberId:   mId,
+			Assignment: assignBytes,
+		})
+	}
+	return &SyncGroupRequest{
+		GroupId:         gid,
+		GenerationId:    genId,
+		MemberId:        memberId,
+		GroupAssignment: assignments,
+	}, nil
+}
+
+// SyncGroupResponse represents the response to SyncGroup request.
+type SyncGroupResponse struct {
+	CorrelationId    int32
+	ThrottleTime     int32
+	ErrorCode        int16
+	MemberAssignment []byte
+}
+
+// Encode serializes the SyncGroup response.
+func (r *SyncGroupResponse) Encode(apiVersion int16) []byte {
+	buf := new(bytes.Buffer)
+	enc := NewEncoder(buf)
+
+	enc.PutInt32(r.CorrelationId)
+	if apiVersion >= 1 {
+		enc.PutInt32(r.ThrottleTime)
+	}
+	enc.PutInt16(r.ErrorCode)
+	enc.PutBytes(r.MemberAssignment)
+
+	return buf.Bytes()
+}
+
+// HeartbeatResponse represents the Heartbeat response.
+type HeartbeatResponse struct {
+	CorrelationId int32
+	ThrottleTime  int32
+	ErrorCode     int16
+}
+
+// Encode serializes Heartbeat response.
+func (r *HeartbeatResponse) Encode(apiVersion int16) []byte {
+	buf := new(bytes.Buffer)
+	enc := NewEncoder(buf)
+
+	enc.PutInt32(r.CorrelationId)
+	if apiVersion >= 1 {
+		enc.PutInt32(r.ThrottleTime)
+	}
+	enc.PutInt16(r.ErrorCode)
+
+	return buf.Bytes()
+}
+
+// LeaveGroupResponse represents the LeaveGroup response.
+type LeaveGroupResponse struct {
+	CorrelationId int32
+	ThrottleTime  int32
+	ErrorCode     int16
+}
+
+// Encode serializes LeaveGroup response.
+func (r *LeaveGroupResponse) Encode(apiVersion int16) []byte {
+	buf := new(bytes.Buffer)
+	enc := NewEncoder(buf)
+
+	enc.PutInt32(r.CorrelationId)
+	if apiVersion >= 1 {
+		enc.PutInt32(r.ThrottleTime)
+	}
+	enc.PutInt16(r.ErrorCode)
+
+	return buf.Bytes()
+}
+
+// BuildDefaultMemberAssignment builds a standard consumer protocol assignment payload for given topics.
+func BuildDefaultMemberAssignment(topics []string, partitionsPerTopic int32) []byte {
+	buf := new(bytes.Buffer)
+	enc := NewEncoder(buf)
+	enc.PutInt16(0) // protocol version 0
+	enc.PutInt32(int32(len(topics)))
+	for _, t := range topics {
+		enc.PutString(t)
+		enc.PutInt32(partitionsPerTopic)
+		for p := int32(0); p < partitionsPerTopic; p++ {
+			enc.PutInt32(p)
+		}
+	}
+	enc.PutBytes(nil) // UserData
 	return buf.Bytes()
 }
