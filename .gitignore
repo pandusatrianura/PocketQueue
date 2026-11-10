@@ -22,14 +22,12 @@ coverage.html
 # Vendor dependencies
 vendor/
 
+# Artifacts & planning docs
+artifacts/superpowers/
+
+# Workflows
+.github/workflows/
+
 # Ignore all hidden files and directories (prefix with .)
 .*
-
-# Whitelist only PocketQueue repository configs and CI workflows
 !.gitignore
-!.github/
-.github/*
-!.github/workflows/
-.github/workflows/*
-!.github/workflows/ci.yml
-!.github/workflows/release.yml
