@@ -1,0 +1,35 @@
+# Binaries & compiled artifacts
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Runtime logs & local storage
+*.log
+*.wal
+data/
+tmp*/
+e2e_demo/
+
+# Test & coverage artifacts
+*.test
+*.out
+coverage.html
+
+# Vendor dependencies
+vendor/
+
+# Ignore all hidden files and directories (prefix with .)
+.*
+
+# Whitelist only PocketQueue repository configs and CI workflows
+!.gitignore
+!.github/
+.github/*
+!.github/workflows/
+.github/workflows/*
+!.github/workflows/ci.yml
+!.github/workflows/release.yml
