@@ -37,6 +37,8 @@ This roadmap outlines the evolution of PocketQueue while adhering strictly to th
 
 ### Milestone 3: Client SDK Compatibility Test Matrix (Next)
 *Objective: Guarantee out-of-the-box drop-in compatibility with official language SDKs in real microservices.*
+> ⚠️ **Prerequisite Gate**: Every client SDK integration suite must strictly adhere to the [3-Tier Pre-Implementation Triage Framework](architecture/triage-framework.md) (🔴 Must Handle Now, 🟡 Defensive Default, 🟢 Explicitly Ignored).
+
 - **Go Ecosystem**:
   - `IBM/sarama` (Standard Go Kafka driver)
   - `redis/go-redis/v9` (Standard Go Redis Streams client)
@@ -60,3 +62,4 @@ This roadmap outlines the evolution of PocketQueue while adhering strictly to th
 2. **Idle Memory Ceiling**: `< 25.0 MB` (Current: `7.75 MB`).
 3. **Cold Boot Ceiling**: `< 20.0 ms` (Current: `1.67 ms`).
 4. **Zero External Runtime Dependencies**: Pure Go, zero CGo, zero JVM, zero Docker required for operation.
+

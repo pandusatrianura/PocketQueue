@@ -2,10 +2,12 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
 	"github.com/pandusatrianura/pocketqueue/internal/features/broker"
+	"github.com/pandusatrianura/pocketqueue/internal/features/storage"
 )
 
 // Handler processes Kafka requests and delegates to BrokerService.
@@ -175,10 +177,13 @@ func (h *Handler) handleProduce(ctx context.Context, header *RequestHeader, body
 
 			items, _ := DecodeRecordBatchV2(recordSetBytes)
 			var baseOffset int64 = -1
+			var lastErr error
 
 			for _, item := range items {
 				rec, err := h.broker.Produce(ctx, topicName, partID, item.Key, item.Value, nil)
-				if err == nil && baseOffset == -1 {
+				if err != nil {
+					lastErr = err
+				} else if baseOffset == -1 {
 					baseOffset = rec.Offset
 				}
 			}
@@ -187,9 +192,20 @@ func (h *Handler) handleProduce(ctx context.Context, header *RequestHeader, body
 				baseOffset = 0
 			}
 
+			errCode := ErrNone
+			if lastErr != nil {
+				if errors.Is(lastErr, storage.ErrWALFileSizeLimitExceeded) {
+					errCode = ErrKafkaStorageError
+				} else if errors.Is(lastErr, broker.ErrPartitionLimitExceeded) {
+					errCode = ErrUnknownTopicOrPartition
+				} else {
+					errCode = ErrUnknownTopicOrPartition
+				}
+			}
+
 			partResponses = append(partResponses, ProducePartitionResponse{
 				Partition:      partID,
-				ErrorCode:      ErrNone,
+				ErrorCode:      errCode,
 				BaseOffset:     baseOffset,
 				LogAppendTime:  -1,
 				LogStartOffset: 0,

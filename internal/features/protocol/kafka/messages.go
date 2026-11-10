@@ -34,6 +34,7 @@ const (
 	ErrNotCoordinator           int16 = 16
 	ErrIllegalGeneration        int16 = 22
 	ErrUnsupportedVersion       int16 = 35
+	ErrKafkaStorageError        int16 = 56 // KAFKA_STORAGE_ERROR: Disk error when accessing log/partition
 )
 
 // RequestHeader is the standard Kafka request header (v0-v1).

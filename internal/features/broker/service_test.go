@@ -217,3 +217,27 @@ func TestBrokerService_PartitionLimitExceeded(t *testing.T) {
 	}
 }
 
+func TestBrokerService_ContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel context immediately
+
+	engine := storage.NewMemoryEngine(100)
+	bus := broker.NewEventBus(10)
+	svc := broker.NewService(engine, bus, 1)
+	defer svc.Close()
+
+	subCh, unsub := bus.Subscribe()
+	defer unsub()
+
+	// Produce with canceled context
+	_, _ = svc.Produce(ctx, "canceled-topic", 0, []byte("key"), []byte("value"), nil)
+
+	// EventBus should not receive any event because context was canceled
+	select {
+	case ev := <-subCh:
+		t.Fatalf("unexpected event received on bus for canceled context: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+		// Expected timeout
+	}
+}
+

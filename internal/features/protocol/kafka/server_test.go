@@ -509,3 +509,98 @@ func TestKafkaServer_PortInUse(t *testing.T) {
 		t.Errorf("expected error wrapping kafka.ErrPortInUse, got: %v", err)
 	}
 }
+
+func TestKafkaServer_ProduceStorageErrorOnWALCap(t *testing.T) {
+	tempDir := t.TempDir()
+	// Set very small cap (50 bytes)
+	engine, err := storage.NewWALEngineWithLimit(tempDir, 50)
+	if err != nil {
+		t.Fatalf("failed to create wal engine: %v", err)
+	}
+	defer engine.Close()
+
+	bus := broker.NewEventBus(10)
+	svc := broker.NewService(engine, bus, 1)
+
+	handler := kafka.NewHandler(svc, "127.0.0.1", 9092, nil)
+	server := kafka.NewServer("127.0.0.1:0", handler, nil)
+	if err := server.Start(); err != nil {
+		t.Fatalf("failed to start server: %v", err)
+	}
+	defer server.Close()
+
+	conn, err := net.DialTimeout("tcp", server.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("failed to dial server: %v", err)
+	}
+	defer conn.Close()
+
+	// Send Produce request exceeding 50 bytes WAL cap
+	prodBuf := new(bytes.Buffer)
+	pEnc := kafka.NewEncoder(prodBuf)
+	pEnc.PutInt16(kafka.ApiKeyProduce)
+	pEnc.PutInt16(3)    // version 3
+	pEnc.PutInt32(7777) // correlation ID
+	pEnc.PutString("storage-err-client")
+
+	pEnc.PutNullableString(nil) // transactional_id
+	pEnc.PutInt16(1)            // acks = 1
+	pEnc.PutInt32(1000)         // timeout_ms
+
+	pEnc.PutInt32(1)            // 1 topic
+	pEnc.PutString("capped-topic")
+	pEnc.PutInt32(1)            // 1 partition
+	pEnc.PutInt32(0)            // partition 0
+
+	// 100 bytes of data to exceed 50 byte cap
+	bigData := make([]byte, 100)
+	batchBytes := kafka.EncodeRecordBatchV2(0, []kafka.RecordItem{
+		{Key: []byte("k"), Value: bigData},
+	})
+	pEnc.PutBytes(batchBytes)
+
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(prodBuf.Len()))
+	_, _ = conn.Write(lenBuf[:])
+	_, _ = conn.Write(prodBuf.Bytes())
+
+	// Read response
+	var respLenBuf [4]byte
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(conn, respLenBuf[:]); err != nil {
+		t.Fatalf("failed to read response length: %v", err)
+	}
+	respLen := int(binary.BigEndian.Uint32(respLenBuf[:]))
+	respPayload := make([]byte, respLen)
+	if _, err := io.ReadFull(conn, respPayload); err != nil {
+		t.Fatalf("failed to read response payload: %v", err)
+	}
+
+	dec := kafka.NewDecoder(respPayload)
+	corrId, _ := dec.GetInt32()
+	if corrId != 7777 {
+		t.Errorf("expected correlation ID 7777, got %d", corrId)
+	}
+
+	// Read ProduceResponse body
+	topicsCount, _ := dec.GetInt32()
+	if topicsCount != 1 {
+		t.Fatalf("expected 1 topic response, got %d", topicsCount)
+	}
+	topicName, _ := dec.GetString()
+	if topicName != "capped-topic" {
+		t.Errorf("expected topic capped-topic, got %s", topicName)
+	}
+	partsCount, _ := dec.GetInt32()
+	if partsCount != 1 {
+		t.Fatalf("expected 1 partition response, got %d", partsCount)
+	}
+	partId, _ := dec.GetInt32()
+	if partId != 0 {
+		t.Errorf("expected partition 0, got %d", partId)
+	}
+	errCode, _ := dec.GetInt16()
+	if errCode != kafka.ErrKafkaStorageError {
+		t.Fatalf("expected ErrKafkaStorageError (56), got %d", errCode)
+	}
+}

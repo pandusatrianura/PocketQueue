@@ -116,7 +116,7 @@ func (s *Service) Produce(ctx context.Context, topic string, partition int32, ke
 		return nil, fmt.Errorf("storage append failed for topic %s: %w", topic, err)
 	}
 
-	if s.eventBus != nil {
+	if s.eventBus != nil && (ctx == nil || ctx.Err() == nil) {
 		s.eventBus.Publish(*rec)
 	}
 
@@ -212,7 +212,7 @@ func (s *Service) SendToDLQ(ctx context.Context, topic string, partition int32, 
 	}
 
 	rec.IsDLQ = true
-	if s.eventBus != nil {
+	if s.eventBus != nil && (ctx == nil || ctx.Err() == nil) {
 		s.eventBus.Publish(*rec)
 	}
 

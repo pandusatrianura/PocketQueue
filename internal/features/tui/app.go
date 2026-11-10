@@ -395,6 +395,10 @@ func (m *AppModel) executeReplay() bool {
 	return true
 }
 
+// isBinaryData heuristic detects binary payloads. We check if null bytes (0x00) exist,
+// or if non-printable characters exceed 5% of the total byte length.
+// The 5% threshold allows normal UTF-8 text with occasional symbols, emojis, or international
+// multibyte characters without falsely classifying standard messages as binary.
 func isBinaryData(b []byte) bool {
 	if len(b) == 0 {
 		return false
