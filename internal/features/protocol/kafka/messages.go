@@ -104,13 +104,17 @@ func BuildApiVersionsResponse(correlationId int32) *ApiVersionsResponse {
 			{ApiKey: ApiKeyHeartbeat, MinVersion: 0, MaxVersion: 2},
 			{ApiKey: ApiKeyLeaveGroup, MinVersion: 0, MaxVersion: 2},
 			{ApiKey: ApiKeySyncGroup, MinVersion: 0, MaxVersion: 2},
-			{ApiKey: ApiKeyApiVersions, MinVersion: 0, MaxVersion: 3},
+			{ApiKey: ApiKeyApiVersions, MinVersion: 0, MaxVersion: 0},
 		},
 	}
 }
 
 // Encode serializes the ApiVersions response into bytes.
-func (r *ApiVersionsResponse) Encode() []byte {
+func (r *ApiVersionsResponse) Encode(version ...int16) []byte {
+	var v int16 = 0
+	if len(version) > 0 {
+		v = version[0]
+	}
 	buf := new(bytes.Buffer)
 	enc := NewEncoder(buf)
 
@@ -123,7 +127,10 @@ func (r *ApiVersionsResponse) Encode() []byte {
 		enc.PutInt16(api.MinVersion)
 		enc.PutInt16(api.MaxVersion)
 	}
-	enc.PutInt32(0) // ThrottleTimeMs
+
+	if v >= 1 {
+		enc.PutInt32(0) // ThrottleTimeMs
+	}
 
 	return buf.Bytes()
 }
@@ -159,12 +166,21 @@ type MetadataResponse struct {
 	Topics        []TopicMetadataResponse
 }
 
-// Encode serializes the MetadataResponse.
-func (r *MetadataResponse) Encode() []byte {
+// Encode serializes the MetadataResponse into bytes matching the requested API version.
+func (r *MetadataResponse) Encode(version ...int16) []byte {
+	var v int16 = 0
+	if len(version) > 0 {
+		v = version[0]
+	}
+
 	buf := new(bytes.Buffer)
 	enc := NewEncoder(buf)
 
 	enc.PutInt32(r.CorrelationId)
+
+	if v >= 3 {
+		enc.PutInt32(0) // ThrottleTimeMs
+	}
 
 	// Brokers array
 	enc.PutInt32(int32(len(r.Brokers)))
@@ -172,6 +188,18 @@ func (r *MetadataResponse) Encode() []byte {
 		enc.PutInt32(b.NodeId)
 		enc.PutString(b.Host)
 		enc.PutInt32(b.Port)
+		if v >= 1 {
+			enc.PutNullableString(nil) // Rack (nullable string)
+		}
+	}
+
+	if v >= 2 {
+		clusterID := "pocketqueue"
+		enc.PutNullableString(&clusterID) // ClusterId (nullable string)
+	}
+
+	if v >= 1 {
+		enc.PutInt32(0) // ControllerId (int32)
 	}
 
 	// Topics array
@@ -179,10 +207,12 @@ func (r *MetadataResponse) Encode() []byte {
 	for _, t := range r.Topics {
 		enc.PutInt16(t.ErrorCode)
 		enc.PutString(t.Topic)
-		if t.IsInternal {
-			enc.PutInt8(1)
-		} else {
-			enc.PutInt8(0)
+		if v >= 1 {
+			if t.IsInternal {
+				enc.PutInt8(1)
+			} else {
+				enc.PutInt8(0)
+			}
 		}
 
 		enc.PutInt32(int32(len(t.Partitions)))
@@ -190,6 +220,10 @@ func (r *MetadataResponse) Encode() []byte {
 			enc.PutInt16(p.ErrorCode)
 			enc.PutInt32(p.PartitionId)
 			enc.PutInt32(p.Leader)
+
+			if v >= 7 {
+				enc.PutInt32(0) // LeaderEpoch
+			}
 
 			// Replicas
 			enc.PutInt32(int32(len(p.Replicas)))
@@ -201,6 +235,10 @@ func (r *MetadataResponse) Encode() []byte {
 			enc.PutInt32(int32(len(p.Isr)))
 			for _, isr := range p.Isr {
 				enc.PutInt32(isr)
+			}
+
+			if v >= 5 {
+				enc.PutInt32(0) // OfflineReplicas (count 0)
 			}
 		}
 	}
@@ -218,12 +256,23 @@ type FindCoordinatorResponse struct {
 }
 
 // Encode serializes FindCoordinatorResponse.
-func (r *FindCoordinatorResponse) Encode() []byte {
+func (r *FindCoordinatorResponse) Encode(version ...int16) []byte {
+	var v int16 = 0
+	if len(version) > 0 {
+		v = version[0]
+	}
+
 	buf := new(bytes.Buffer)
 	enc := NewEncoder(buf)
 
 	enc.PutInt32(r.CorrelationId)
+	if v >= 1 {
+		enc.PutInt32(0) // ThrottleTimeMs
+	}
 	enc.PutInt16(r.ErrorCode)
+	if v >= 1 {
+		enc.PutNullableString(nil) // ErrorMessage
+	}
 	enc.PutInt32(r.NodeId)
 	enc.PutString(r.Host)
 	enc.PutInt32(r.Port)
@@ -418,11 +467,19 @@ type OffsetCommitPartitionResponse struct {
 	ErrorCode int16
 }
 
-func (r *OffsetCommitResponse) Encode() []byte {
+func (r *OffsetCommitResponse) Encode(version ...int16) []byte {
+	var v int16 = 0
+	if len(version) > 0 {
+		v = version[0]
+	}
+
 	buf := new(bytes.Buffer)
 	enc := NewEncoder(buf)
 
 	enc.PutInt32(r.CorrelationId)
+	if v >= 3 {
+		enc.PutInt32(0) // ThrottleTimeMs
+	}
 	enc.PutInt32(int32(len(r.Topics)))
 	for _, t := range r.Topics {
 		enc.PutString(t.Topic)
@@ -453,11 +510,19 @@ type OffsetFetchPartitionResponse struct {
 	ErrorCode int16
 }
 
-func (r *OffsetFetchResponse) Encode() []byte {
+func (r *OffsetFetchResponse) Encode(version ...int16) []byte {
+	var v int16 = 0
+	if len(version) > 0 {
+		v = version[0]
+	}
+
 	buf := new(bytes.Buffer)
 	enc := NewEncoder(buf)
 
 	enc.PutInt32(r.CorrelationId)
+	if v >= 3 {
+		enc.PutInt32(0) // ThrottleTimeMs
+	}
 	enc.PutInt32(int32(len(r.Topics)))
 	for _, t := range r.Topics {
 		enc.PutString(t.Topic)
@@ -465,9 +530,15 @@ func (r *OffsetFetchResponse) Encode() []byte {
 		for _, p := range t.Partitions {
 			enc.PutInt32(p.Partition)
 			enc.PutInt64(p.Offset)
+			if v >= 5 {
+				enc.PutInt32(-1) // LeaderEpoch = -1
+			}
 			enc.PutString(p.Metadata)
 			enc.PutInt16(p.ErrorCode)
 		}
+	}
+	if v >= 2 {
+		enc.PutInt16(ErrNone) // Top-level ErrorCode
 	}
 	return buf.Bytes()
 }
@@ -490,11 +561,20 @@ type ListOffsetsPartitionResponse struct {
 	Offset    int64
 }
 
-func (r *ListOffsetsResponse) Encode() []byte {
+func (r *ListOffsetsResponse) Encode(version ...int16) []byte {
+	var v int16 = 0
+	if len(version) > 0 {
+		v = version[0]
+	}
+
 	buf := new(bytes.Buffer)
 	enc := NewEncoder(buf)
 
 	enc.PutInt32(r.CorrelationId)
+	if v >= 2 {
+		enc.PutInt32(0) // ThrottleTimeMs
+	}
+
 	enc.PutInt32(int32(len(r.Topics)))
 	for _, t := range r.Topics {
 		enc.PutString(t.Topic)
@@ -502,8 +582,16 @@ func (r *ListOffsetsResponse) Encode() []byte {
 		for _, p := range t.Partitions {
 			enc.PutInt32(p.Partition)
 			enc.PutInt16(p.ErrorCode)
-			enc.PutInt64(p.Timestamp)
-			enc.PutInt64(p.Offset)
+			if v == 0 {
+				enc.PutInt32(1) // 1 offset
+				enc.PutInt64(p.Offset)
+			} else {
+				enc.PutInt64(p.Timestamp)
+				enc.PutInt64(p.Offset)
+				if v >= 4 {
+					enc.PutInt32(0) // LeaderEpoch
+				}
+			}
 		}
 	}
 	return buf.Bytes()
@@ -571,12 +659,24 @@ type FetchPartitionResponse struct {
 	RecordBatch         []byte
 }
 
-func (r *FetchResponse) Encode() []byte {
+func (r *FetchResponse) Encode(version ...int16) []byte {
+	var v int16 = 0
+	if len(version) > 0 {
+		v = version[0]
+	}
+
 	buf := new(bytes.Buffer)
 	enc := NewEncoder(buf)
 
 	enc.PutInt32(r.CorrelationId)
-	enc.PutInt32(r.ThrottleTime)
+	if v >= 1 {
+		enc.PutInt32(r.ThrottleTime)
+	}
+	if v >= 7 {
+		enc.PutInt16(0) // ErrorCode
+		enc.PutInt32(0) // SessionID
+	}
+
 	enc.PutInt32(int32(len(r.Topics)))
 	for _, t := range r.Topics {
 		enc.PutString(t.Topic)
@@ -585,9 +685,14 @@ func (r *FetchResponse) Encode() []byte {
 			enc.PutInt32(p.Partition)
 			enc.PutInt16(p.ErrorCode)
 			enc.PutInt64(p.HighWatermark)
-			enc.PutInt64(p.LastStableOffset)
-			enc.PutInt64(p.LogStartOffset)
-			enc.PutInt32(0) // Aborted transactions count = 0
+			if v >= 4 {
+				enc.PutInt64(p.LastStableOffset)
+				enc.PutInt64(p.LogStartOffset)
+				enc.PutInt32(0) // Aborted transactions count = 0
+			}
+			if v >= 11 {
+				enc.PutInt32(-1) // PreferredReadReplica = -1
+			}
 			// Put record batch bytes (length prefix + bytes)
 			enc.PutBytes(p.RecordBatch)
 		}

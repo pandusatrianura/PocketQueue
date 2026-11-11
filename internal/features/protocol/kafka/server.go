@@ -85,6 +85,11 @@ func (s *Server) Start() error {
 	s.mu.Lock()
 	s.listener = ln
 	s.addr = ln.Addr().String()
+	if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok && s.handler != nil {
+		if s.handler.advertisedPort <= 0 {
+			s.handler.advertisedPort = int32(tcpAddr.Port)
+		}
+	}
 	s.mu.Unlock()
 
 	s.logger.Info("kafka protocol server listening", slog.String("addr", s.addr))

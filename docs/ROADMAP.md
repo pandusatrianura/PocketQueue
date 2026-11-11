@@ -31,23 +31,31 @@ This roadmap outlines the evolution of PocketQueue while adhering strictly to th
 - **Architecture Doctrine**
   - Codified the **3-Tier Pre-Implementation Triage Framework** in `docs/architecture/triage-framework.md`.
 
+### Milestone 3: Real-World Client SDK Compatibility Matrix (Go Ecosystem)
+*Objective: Guarantee out-of-the-box drop-in compatibility with official production client libraries.*
+- **Official Go Kafka Client (`github.com/IBM/sarama`)**:
+  - `sarama.NewSyncProducer`: Verified message production, topic creation, partition routing, and monotonic base offsets.
+  - `sarama.NewConsumer`: Verified partition subscription, API version negotiation, watermark resolution, and FIFO consumption.
+  - `sarama.NewConsumerGroup`: Verified high-level consumer group rebalance flow (`FindCoordinator`, `JoinGroup`, `SyncGroup`, `Heartbeat`, `OffsetFetch`, `OffsetCommit`).
+- **Official Go Redis Client (`github.com/redis/go-redis/v9`)**:
+  - `rdb.Ping()`: Verified connection handshake and `HELLO` RESP protocol negotiation.
+  - `rdb.XAdd()` & `rdb.XLen()` & `rdb.XRange()`: Verified standard Redis Streams ingestion, stream length query, and ID range retrieval.
+  - `rdb.XRead()` with `Block`: Verified blocking read timeouts (`redis.Nil`) and event-driven live pub/sub wakeups.
+- **Zero Binary Bloat Guarantee**:
+  - All SDK dependencies are strictly test-scoped in `test/compatibility/` — binary size remains **5.02 MB** (budget < 15.0 MB).
+
 ---
 
 ## 🚀 Upcoming Milestones
 
-### Milestone 3: Client SDK Compatibility Test Matrix (Next)
-*Objective: Guarantee out-of-the-box drop-in compatibility with official language SDKs in real microservices.*
-> ⚠️ **Prerequisite Gate**: Every client SDK integration suite must strictly adhere to the [3-Tier Pre-Implementation Triage Framework](architecture/triage-framework.md) (🔴 Must Handle Now, 🟡 Defensive Default, 🟢 Explicitly Ignored).
-
-- **Go Ecosystem**:
-  - `IBM/sarama` (Standard Go Kafka driver)
-  - `redis/go-redis/v9` (Standard Go Redis Streams client)
+### Milestone 3b: Multi-Language Client SDK Compatibility Test Matrix
+*Objective: Expand client verification matrix across additional language runtimes.*
 - **Python Ecosystem**:
-  - `kafka-python` / `confluent-kafka` (Python producer & consumer)
   - `redis-py` (Python Redis Streams client)
+  - `kafka-python` / `confluent-kafka`
 - **Node.js / TypeScript Ecosystem**:
-  - `kafkajs` (Popular Node Kafka library)
   - `ioredis` (Standard Node Redis client)
+  - `kafkajs` (Popular Node Kafka library)
 
 ### Milestone 4: Multi-Arch Binary Packaging & Distribution
 *Objective: Instant zero-install usage for developers across macOS, Linux, and Windows.*

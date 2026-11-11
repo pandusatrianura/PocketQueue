@@ -38,10 +38,10 @@ type Service struct {
 	eventBus          *EventBus
 	defaultPartitions int32
 
-	mu            sync.RWMutex
-	topics        map[string]int32 // topicName -> partitionCount
-	groupOffsets  map[string]map[string]map[int32]int64 // groupID -> topic -> partition -> offset
-	closed        bool
+	mu           sync.RWMutex
+	topics       map[string]int32                      // topicName -> partitionCount
+	groupOffsets map[string]map[string]map[int32]int64 // groupID -> topic -> partition -> offset
+	closed       bool
 }
 
 // NewService instantiates a BrokerService.
@@ -293,4 +293,3 @@ func (s *Service) Close() error {
 	}
 	return nil
 }
-

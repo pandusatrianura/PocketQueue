@@ -107,6 +107,52 @@ PocketQueue allows Kafka and Redis clients to communicate through the same broke
 
 ---
 
+## 🔌 Verified Client SDK Compatibility
+
+PocketQueue is continuously tested against official production client libraries to guarantee drop-in compatibility with real microservices:
+
+| Ecosystem | Client Library | Protocol | Tested Capabilities | Status |
+|---|---|---|---|:---:|
+| **Go** | [`IBM/sarama`](https://github.com/IBM/sarama) | Kafka `:9092` | `SyncProducer`, `Consumer`, `ConsumerGroup`, RecordBatch v2 | ✅ Verified |
+| **Go** | [`redis/go-redis/v9`](https://github.com/redis/go-redis/v9) | Redis Streams `:6379` | `Ping`, `XAdd`, `XLen`, `XRange`, `XRead` (with `Block`) | ✅ Verified |
+
+#### Go Example: Producing & Consuming with `IBM/sarama`
+```go
+config := sarama.NewConfig()
+config.Version = sarama.V2_1_0_0
+config.Producer.Return.Successes = true
+
+producer, _ := sarama.NewSyncProducer([]string{"127.0.0.1:9092"}, config)
+defer producer.Close()
+
+// Publish message
+producer.SendMessage(&sarama.ProducerMessage{
+    Topic: "orders",
+    Key:   sarama.StringEncoder("ord-001"),
+    Value: sarama.StringEncoder(`{"status": "paid"}`),
+})
+```
+
+#### Go Example: Appending & Blocking Read with `go-redis`
+```go
+rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
+defer rdb.Close()
+
+// Append to stream
+rdb.XAdd(ctx, &redis.XAddArgs{
+    Stream: "telemetry",
+    Values: map[string]interface{}{"temp": "24.5"},
+})
+
+// Blocking read
+entries, _ := rdb.XRead(ctx, &redis.XReadArgs{
+    Streams: []string{"telemetry", "$"},
+    Block:   5 * time.Second,
+}).Result()
+```
+
+---
+
 ## ⚙️ How to Configure for Running Well
 
 PocketQueue requires zero configuration by default, but provides fine-grained controls for different environments.

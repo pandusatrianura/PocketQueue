@@ -34,6 +34,11 @@ func NewHandler(b *broker.Service, host string, port int32, l *slog.Logger) *Han
 	}
 }
 
+// SetAdvertisedPort dynamically updates the advertised port (e.g. when bound to an ephemeral port).
+func (h *Handler) SetAdvertisedPort(port int32) {
+	h.advertisedPort = port
+}
+
 // HandleRequest routes a Kafka request to the appropriate sub-handler.
 func (h *Handler) HandleRequest(ctx context.Context, header *RequestHeader, body []byte) ([]byte, error) {
 	switch header.ApiKey {
@@ -72,7 +77,7 @@ func (h *Handler) HandleRequest(ctx context.Context, header *RequestHeader, body
 
 func (h *Handler) handleApiVersions(header *RequestHeader) ([]byte, error) {
 	resp := BuildApiVersionsResponse(header.CorrelationId)
-	return resp.Encode(), nil
+	return resp.Encode(0), nil
 }
 
 func (h *Handler) handleFindCoordinator(header *RequestHeader, body []byte) ([]byte, error) {
@@ -83,7 +88,7 @@ func (h *Handler) handleFindCoordinator(header *RequestHeader, body []byte) ([]b
 		Host:          h.advertisedHost,
 		Port:          h.advertisedPort,
 	}
-	return resp.Encode(), nil
+	return resp.Encode(header.ApiVersion), nil
 }
 
 func (h *Handler) handleMetadata(ctx context.Context, header *RequestHeader, body []byte) ([]byte, error) {
@@ -146,7 +151,7 @@ func (h *Handler) handleMetadata(ctx context.Context, header *RequestHeader, bod
 		Topics: topicResponses,
 	}
 
-	return resp.Encode(), nil
+	return resp.Encode(header.ApiVersion), nil
 }
 
 func (h *Handler) handleProduce(ctx context.Context, header *RequestHeader, body []byte) ([]byte, error) {
@@ -309,7 +314,7 @@ func (h *Handler) handleFetch(ctx context.Context, header *RequestHeader, body [
 		Topics:        topicResponses,
 	}
 
-	return resp.Encode(), nil
+	return resp.Encode(header.ApiVersion), nil
 }
 
 func (h *Handler) handleListOffsets(ctx context.Context, header *RequestHeader, body []byte) ([]byte, error) {
@@ -333,6 +338,9 @@ func (h *Handler) handleListOffsets(ctx context.Context, header *RequestHeader, 
 
 		for j := 0; j < int(partsCount); j++ {
 			partID, _ := dec.GetInt32()
+			if header.ApiVersion >= 4 {
+				_, _ = dec.GetInt32() // currentLeaderEpoch
+			}
 			targetTime, _ := dec.GetInt64()
 
 			meta, _ := h.broker.GetTopicMetadata(ctx, topicName)
@@ -364,7 +372,7 @@ func (h *Handler) handleListOffsets(ctx context.Context, header *RequestHeader, 
 		Topics:        topicResponses,
 	}
 
-	return resp.Encode(), nil
+	return resp.Encode(header.ApiVersion), nil
 }
 
 func (h *Handler) handleOffsetCommit(ctx context.Context, header *RequestHeader, body []byte) ([]byte, error) {
@@ -411,7 +419,7 @@ func (h *Handler) handleOffsetCommit(ctx context.Context, header *RequestHeader,
 		Topics:        topicResponses,
 	}
 
-	return resp.Encode(), nil
+	return resp.Encode(header.ApiVersion), nil
 }
 
 func (h *Handler) handleOffsetFetch(ctx context.Context, header *RequestHeader, body []byte) ([]byte, error) {
@@ -453,7 +461,7 @@ func (h *Handler) handleOffsetFetch(ctx context.Context, header *RequestHeader, 
 		Topics:        topicResponses,
 	}
 
-	return resp.Encode(), nil
+	return resp.Encode(header.ApiVersion), nil
 }
 
 func (h *Handler) handleJoinGroup(ctx context.Context, header *RequestHeader, body []byte) ([]byte, error) {
