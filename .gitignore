@@ -26,8 +26,14 @@ vendor/
 artifacts/superpowers/
 
 # Workflows
-.github/workflows/
+.github/workflows/*
+!.github/workflows/ci.yml
+!.github/workflows/release.yml
 
 # Ignore all hidden files and directories (prefix with .)
 .*
 !.gitignore
+!.github/
+!.github/workflows/
+!.github/workflows/ci.yml
+!.github/workflows/release.yml
