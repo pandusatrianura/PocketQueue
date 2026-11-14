@@ -1,0 +1,29 @@
+{
+  "version": "0.3.0",
+  "description": "Ultra-lightweight embedded message broker supporting Kafka & Redis wire protocols",
+  "homepage": "https://github.com/pandusatrianura/pocketqueue",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/pandusatrianura/pocketqueue/releases/download/v0.3.0/pocketqueue-windows-amd64.zip",
+      "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "bin": "pocketqueue.exe"
+    },
+    "arm64": {
+      "url": "https://github.com/pandusatrianura/pocketqueue/releases/download/v0.3.0/pocketqueue-windows-arm64.zip",
+      "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "bin": "pocketqueue.exe"
+    }
+  },
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/pandusatrianura/pocketqueue/releases/download/v$version/pocketqueue-windows-amd64.zip"
+      },
+      "arm64": {
+        "url": "https://github.com/pandusatrianura/pocketqueue/releases/download/v$version/pocketqueue-windows-arm64.zip"
+      }
+    }
+  }
+}

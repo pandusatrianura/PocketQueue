@@ -22,6 +22,8 @@ const (
 	ApiKeyDescribeGroups  int16 = 15
 	ApiKeyListGroups      int16 = 16
 	ApiKeyApiVersions     int16 = 18
+	ApiKeyCreateTopics    int16 = 19
+	ApiKeyDeleteTopics    int16 = 20
 )
 
 // Standard Kafka Error Codes
@@ -34,6 +36,9 @@ const (
 	ErrNotCoordinator           int16 = 16
 	ErrIllegalGeneration        int16 = 22
 	ErrUnsupportedVersion       int16 = 35
+	ErrTopicAlreadyExists       int16 = 36
+	ErrInvalidPartitions        int16 = 37
+	ErrInvalidReplication       int16 = 38
 	ErrKafkaStorageError        int16 = 56 // KAFKA_STORAGE_ERROR: Disk error when accessing log/partition
 )
 
@@ -105,6 +110,8 @@ func BuildApiVersionsResponse(correlationId int32) *ApiVersionsResponse {
 			{ApiKey: ApiKeyLeaveGroup, MinVersion: 0, MaxVersion: 2},
 			{ApiKey: ApiKeySyncGroup, MinVersion: 0, MaxVersion: 2},
 			{ApiKey: ApiKeyApiVersions, MinVersion: 0, MaxVersion: 0},
+			{ApiKey: ApiKeyCreateTopics, MinVersion: 0, MaxVersion: 5},
+			{ApiKey: ApiKeyDeleteTopics, MinVersion: 0, MaxVersion: 3},
 		},
 	}
 }
@@ -946,5 +953,75 @@ func BuildDefaultMemberAssignment(topics []string, partitionsPerTopic int32) []b
 		}
 	}
 	enc.PutBytes(nil) // UserData
+	return buf.Bytes()
+}
+
+// CreateTopicError represents per-topic status in CreateTopics response.
+type CreateTopicError struct {
+	Topic        string
+	ErrorCode    int16
+	ErrorMessage *string
+}
+
+// CreateTopicsResponse represents CreateTopics (Key 19) response.
+type CreateTopicsResponse struct {
+	CorrelationId int32
+	Topics        []CreateTopicError
+}
+
+func (r *CreateTopicsResponse) Encode(version ...int16) []byte {
+	var v int16 = 0
+	if len(version) > 0 {
+		v = version[0]
+	}
+
+	buf := new(bytes.Buffer)
+	enc := NewEncoder(buf)
+
+	enc.PutInt32(r.CorrelationId)
+	if v >= 2 {
+		enc.PutInt32(0) // ThrottleTimeMs
+	}
+	enc.PutInt32(int32(len(r.Topics)))
+	for _, t := range r.Topics {
+		enc.PutString(t.Topic)
+		enc.PutInt16(t.ErrorCode)
+		if v >= 1 {
+			enc.PutNullableString(t.ErrorMessage)
+		}
+	}
+	return buf.Bytes()
+}
+
+// DeleteTopicError represents per-topic status in DeleteTopics response.
+type DeleteTopicError struct {
+	Topic     string
+	ErrorCode int16
+}
+
+// DeleteTopicsResponse represents DeleteTopics (Key 20) response.
+type DeleteTopicsResponse struct {
+	CorrelationId int32
+	Topics        []DeleteTopicError
+}
+
+func (r *DeleteTopicsResponse) Encode(version ...int16) []byte {
+	var v int16 = 0
+	if len(version) > 0 {
+		v = version[0]
+	}
+
+	buf := new(bytes.Buffer)
+	enc := NewEncoder(buf)
+
+	enc.PutInt32(r.CorrelationId)
+	if v >= 1 {
+		enc.PutInt32(0) // ThrottleTimeMs
+	}
+	enc.PutInt32(int32(len(r.Topics)))
+	for _, t := range r.Topics {
+		enc.PutString(t.Topic)
+		enc.PutInt16(t.ErrorCode)
+	}
 	return buf.Bytes()
 }

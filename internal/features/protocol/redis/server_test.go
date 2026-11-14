@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,47 @@ import (
 	"github.com/pandusatrianura/pocketqueue/internal/features/protocol/redis"
 	"github.com/pandusatrianura/pocketqueue/internal/features/storage"
 )
+
+func readRESPValue(r *bufio.Reader) (string, error) {
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	line = strings.TrimRight(line, "\r\n")
+	if len(line) == 0 {
+		return "", nil
+	}
+	switch line[0] {
+	case '+', '-', ':':
+		return line, nil
+	case '$':
+		length, err := strconv.Atoi(line[1:])
+		if err != nil || length == -1 {
+			return "", nil
+		}
+		buf := make([]byte, length+2)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return "", err
+		}
+		return string(buf[:length]), nil
+	case '*':
+		count, err := strconv.Atoi(line[1:])
+		if err != nil || count <= 0 {
+			return line, nil
+		}
+		var items []string
+		for i := 0; i < count; i++ {
+			item, err := readRESPValue(r)
+			if err != nil {
+				return "", err
+			}
+			items = append(items, item)
+		}
+		return "[" + strings.Join(items, ", ") + "]", nil
+	default:
+		return line, nil
+	}
+}
 
 func TestRedisServer_StreamsLifecycle(t *testing.T) {
 	engine := storage.NewMemoryEngine(1000)
@@ -229,4 +271,92 @@ func TestRedisServer_QuitAndConnectionClosure(t *testing.T) {
 		t.Errorf("expected EOF after QUIT, got: %v", readErr)
 	}
 }
+
+func TestRedisServer_ConsumerGroupsAndExtendedOps(t *testing.T) {
+	engine := storage.NewMemoryEngine(1000)
+	bus := broker.NewEventBus(100)
+	svc := broker.NewService(engine, bus, 1)
+
+	server := redis.NewServer("127.0.0.1:0", svc, nil)
+	if err := server.Start(); err != nil {
+		t.Fatalf("failed to start redis server: %v", err)
+	}
+	defer server.Close()
+
+	conn, err := net.DialTimeout("tcp", server.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("failed to dial redis server: %v", err)
+	}
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+	sendCmd := func(cmd string) string {
+		if _, err := conn.Write([]byte(cmd)); err != nil {
+			t.Fatalf("write error: %v", err)
+		}
+		val, err := readRESPValue(reader)
+		if err != nil {
+			t.Fatalf("readRESPValue error: %v", err)
+		}
+		return val
+	}
+
+	// 1. XGROUP CREATE mystream mygroup $ MKSTREAM
+	cmdGroupCreate := "*6\r\n$6\r\nXGROUP\r\n$6\r\nCREATE\r\n$8\r\nmystream\r\n$7\r\nmygroup\r\n$1\r\n$\r\n$8\r\nMKSTREAM\r\n"
+	resp := sendCmd(cmdGroupCreate)
+	if resp != "+OK" {
+		t.Fatalf("expected +OK from XGROUP CREATE, got %q", resp)
+	}
+
+	// 2. XADD mystream * k1 v1
+	cmdXAdd1 := "*5\r\n$4\r\nXADD\r\n$8\r\nmystream\r\n$1\r\n*\r\n$2\r\nk1\r\n$2\r\nv1\r\n"
+	if r := sendCmd(cmdXAdd1); r != "0-0" {
+		t.Fatalf("expected 0-0 from XADD 1, got %q", r)
+	}
+
+	// 3. XADD mystream * k2 v2
+	cmdXAdd2 := "*5\r\n$4\r\nXADD\r\n$8\r\nmystream\r\n$1\r\n*\r\n$2\r\nk2\r\n$2\r\nv2\r\n"
+	if r := sendCmd(cmdXAdd2); r != "1-0" {
+		t.Fatalf("expected 1-0 from XADD 2, got %q", r)
+	}
+
+	// 4. XREADGROUP GROUP mygroup c1 COUNT 10 STREAMS mystream >
+	cmdReadGroup := "*9\r\n$10\r\nXREADGROUP\r\n$5\r\nGROUP\r\n$7\r\nmygroup\r\n$2\r\nc1\r\n$5\r\nCOUNT\r\n$2\r\n10\r\n$7\r\nSTREAMS\r\n$8\r\nmystream\r\n$1\r\n>\r\n"
+	rgResp := sendCmd(cmdReadGroup)
+	if !strings.Contains(rgResp, "mystream") || !strings.Contains(rgResp, "0-0") || !strings.Contains(rgResp, "1-0") {
+		t.Fatalf("expected XREADGROUP to contain mystream, 0-0, 1-0, got %q", rgResp)
+	}
+
+	// 5. XACK mystream mygroup 0-0 1-0
+	cmdAck := "*5\r\n$4\r\nXACK\r\n$8\r\nmystream\r\n$7\r\nmygroup\r\n$3\r\n0-0\r\n$3\r\n1-0\r\n"
+	ackResp := sendCmd(cmdAck)
+	if ackResp != ":2" {
+		t.Fatalf("expected :2 from XACK, got %q", ackResp)
+	}
+
+	// 6. XREVRANGE mystream + - COUNT 1
+	cmdRevRange := "*6\r\n$9\r\nXREVRANGE\r\n$8\r\nmystream\r\n$1\r\n+\r\n$1\r\n-\r\n$5\r\nCOUNT\r\n$1\r\n1\r\n"
+	revResp := sendCmd(cmdRevRange)
+	if !strings.Contains(revResp, "1-0") || strings.Contains(revResp, "0-0") {
+		t.Fatalf("expected XREVRANGE to contain 1-0 and not 0-0 (count 1), got %q", revResp)
+	}
+
+	// 7. XDEL mystream 0-0
+	cmdXDel := "*3\r\n$4\r\nXDEL\r\n$8\r\nmystream\r\n$3\r\n0-0\r\n"
+	delResp := sendCmd(cmdXDel)
+	if delResp != ":1" {
+		t.Fatalf("expected :1 from XDEL, got %q", delResp)
+	}
+
+	// 8. XGROUP DESTROY mystream mygroup
+	cmdDestroy := "*4\r\n$6\r\nXGROUP\r\n$7\r\nDESTROY\r\n$8\r\nmystream\r\n$7\r\nmygroup\r\n"
+	destResp := sendCmd(cmdDestroy)
+	if destResp != ":1" {
+		t.Fatalf("expected :1 from XGROUP DESTROY, got %q", destResp)
+	}
+	if destResp != ":1" {
+		t.Fatalf("expected :1 from XGROUP DESTROY, got %q", destResp)
+	}
+}
+
 

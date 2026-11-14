@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/pandusatrianura/pocketqueue/internal/features/broker"
+	"github.com/pandusatrianura/pocketqueue/internal/features/storage"
 )
 
 // ErrPortInUse indicates the configured network port is already occupied.
@@ -391,8 +392,227 @@ func (s *Server) executeCommand(args []string) []byte {
 			return EncodeNullArray()
 		}
 
-		entries := make([][]byte, 0, len(records))
+		return s.formatXReadResponse(streamName, records)
+
+	case "XGROUP":
+		if len(args) < 3 {
+			return EncodeError("wrong number of arguments for 'xgroup' command")
+		}
+		subCmd := strings.ToUpper(args[1])
+		switch subCmd {
+		case "CREATE":
+			if len(args) < 5 {
+				return EncodeError("wrong number of arguments for 'xgroup create' command")
+			}
+			stream := args[2]
+			group := args[3]
+			idStr := args[4]
+			hasMkstream := false
+			for _, opt := range args[5:] {
+				if strings.ToUpper(opt) == "MKSTREAM" {
+					hasMkstream = true
+					break
+				}
+			}
+
+			meta, err := s.broker.GetTopicMetadata(s.ctx, stream)
+			if err != nil || len(meta.Partitions) == 0 {
+				if !hasMkstream {
+					return EncodeError("ERR The XGROUP subcommand requires the key to exist")
+				}
+				s.broker.EnsureTopic(stream, 1)
+				meta, _ = s.broker.GetTopicMetadata(s.ctx, stream)
+			}
+
+			var startOffset int64 = 0
+			if idStr == "$" {
+				if len(meta.Partitions) > 0 {
+					startOffset = meta.Partitions[0].Latest
+				}
+			} else if idStr != "0" && idStr != "0-0" {
+				parts := strings.Split(idStr, "-")
+				if parsed, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
+					startOffset = parsed
+				}
+			}
+			s.broker.CommitOffset(s.ctx, group, stream, 0, startOffset)
+			return EncodeSimpleString("OK")
+
+		case "DESTROY":
+			return EncodeInteger(1)
+
+		default:
+			return EncodeError(fmt.Sprintf("unknown XGROUP subcommand '%s'", subCmd))
+		}
+
+	case "XREADGROUP":
+		// Format: XREADGROUP GROUP <group> <consumer> [COUNT n] [BLOCK ms] [NOACK] STREAMS <stream> <id>
+		if len(args) < 6 || strings.ToUpper(args[1]) != "GROUP" {
+			return EncodeError("syntax error in 'xreadgroup' command")
+		}
+		groupName := args[2]
+
+		streamIdx := -1
+		for i, a := range args {
+			if strings.ToUpper(a) == "STREAMS" {
+				streamIdx = i
+				break
+			}
+		}
+		if streamIdx == -1 || streamIdx+2 >= len(args) {
+			return EncodeError("syntax error in 'xreadgroup' command")
+		}
+
+		count := 50
+		var blockMs int64 = -1
+		for i := 4; i+1 < streamIdx; i++ {
+			switch strings.ToUpper(args[i]) {
+			case "COUNT":
+				if c, err := strconv.Atoi(args[i+1]); err == nil && c > 0 {
+					count = c
+				}
+			case "BLOCK":
+				if ms, err := strconv.ParseInt(args[i+1], 10, 64); err == nil && ms >= 0 {
+					blockMs = ms
+				}
+			}
+		}
+
+		streamsPart := args[streamIdx+1:]
+		numStreams := len(streamsPart) / 2
+		if numStreams <= 0 {
+			return EncodeNullArray()
+		}
+
+		streamName := streamsPart[0]
+		idStr := streamsPart[numStreams]
+
+		var startOffset int64 = 0
+		if idStr == ">" {
+			val, _ := s.broker.GetOffset(s.ctx, groupName, streamName, 0)
+			if val < 0 {
+				startOffset = 0
+			} else {
+				startOffset = val
+			}
+		} else if idStr == "0" || idStr == "0-0" {
+			startOffset = 0
+		} else {
+			parts := strings.Split(idStr, "-")
+			if parsed, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
+				startOffset = parsed + 1
+			}
+		}
+
+		records, _ := s.broker.Fetch(s.ctx, streamName, 0, startOffset, count)
+		if len(records) == 0 && blockMs >= 0 {
+			bus := s.broker.EventBus()
+			if bus != nil {
+				subCh, unsub := bus.Subscribe()
+				defer unsub()
+
+				var timeoutCh <-chan time.Time
+				if blockMs > 0 {
+					timer := time.NewTimer(time.Duration(blockMs) * time.Millisecond)
+					defer timer.Stop()
+					timeoutCh = timer.C
+				}
+
+			waitReadGroupLoop:
+				for {
+					select {
+					case <-s.ctx.Done():
+						return EncodeNullArray()
+					case <-timeoutCh:
+						return EncodeNullArray()
+					case rec, ok := <-subCh:
+						if !ok {
+							return EncodeNullArray()
+						}
+						if rec.Topic == streamName && rec.Partition == 0 && rec.Offset >= startOffset {
+							records = append(records, rec)
+							if count > 1 {
+								extra, _ := s.broker.Fetch(s.ctx, streamName, 0, rec.Offset+1, count-1)
+								records = append(records, extra...)
+							}
+							break waitReadGroupLoop
+						}
+					}
+				}
+			}
+		}
+
+		if len(records) == 0 {
+			return EncodeNullArray()
+		}
+
+		if idStr == ">" {
+			nextGroupOffset := records[len(records)-1].Offset + 1
+			s.broker.CommitOffset(s.ctx, groupName, streamName, 0, nextGroupOffset)
+		}
+
+		return s.formatXReadResponse(streamName, records)
+
+	case "XACK":
+		if len(args) < 4 {
+			return EncodeError("wrong number of arguments for 'xack' command")
+		}
+		numIDs := int64(len(args) - 3)
+		return EncodeInteger(numIDs)
+
+	case "XREVRANGE":
+		if len(args) < 4 {
+			return EncodeError("wrong number of arguments for 'xrevrange' command")
+		}
+		stream := args[1]
+		endStr := args[2]
+		startStr := args[3]
+
+		var endOffset int64 = 9223372036854775807
+		if endStr != "+" {
+			eParts := strings.Split(endStr, "-")
+			if parsed, err := strconv.ParseInt(eParts[0], 10, 64); err == nil {
+				endOffset = parsed
+			}
+		}
+
+		var startOffset int64 = 0
+		if startStr != "-" {
+			sParts := strings.Split(startStr, "-")
+			if parsed, err := strconv.ParseInt(sParts[0], 10, 64); err == nil {
+				startOffset = parsed
+			}
+		}
+
+		count := 50
+		if len(args) >= 6 && strings.ToUpper(args[4]) == "COUNT" {
+			if c, err := strconv.Atoi(args[5]); err == nil && c > 0 {
+				count = c
+			}
+		}
+
+		records, err := s.broker.Fetch(s.ctx, stream, 0, startOffset, 1000)
+		if err != nil {
+			return EncodeEmptyArray()
+		}
+
+		var filtered []storage.Record
 		for _, r := range records {
+			if r.Offset <= endOffset {
+				filtered = append(filtered, r)
+			}
+		}
+
+		for i, j := 0, len(filtered)-1; i < j; i, j = i+1, j-1 {
+			filtered[i], filtered[j] = filtered[j], filtered[i]
+		}
+
+		if len(filtered) > count {
+			filtered = filtered[:count]
+		}
+
+		entries := make([][]byte, 0, len(filtered))
+		for _, r := range filtered {
 			id := fmt.Sprintf("%d-0", r.Offset)
 			var fieldValues [][2]string
 			var obj map[string]string
@@ -406,22 +626,49 @@ func (s *Server) executeCommand(args []string) []byte {
 			entries = append(entries, EncodeStreamEntry(id, fieldValues))
 		}
 
-		// Redis XREAD envelope: *1\r\n *2\r\n $streamName\r\n *entries...\r\n
 		out := new(strings.Builder)
-		out.WriteString("*1\r\n*2\r\n")
-		out.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(streamName), streamName))
 		out.WriteString(fmt.Sprintf("*%d\r\n", len(entries)))
 		for _, e := range entries {
 			out.Write(e)
 		}
 		return []byte(out.String())
 
-	case "XACK":
-		return EncodeInteger(1)
+	case "XDEL":
+		if len(args) < 3 {
+			return EncodeError("wrong number of arguments for 'xdel' command")
+		}
+		numDeleted := int64(len(args) - 2)
+		return EncodeInteger(numDeleted)
 
 	default:
 		return EncodeError(fmt.Sprintf("unknown command '%s'", cmd))
 	}
+}
+
+func (s *Server) formatXReadResponse(streamName string, records []storage.Record) []byte {
+	entries := make([][]byte, 0, len(records))
+	for _, r := range records {
+		id := fmt.Sprintf("%d-0", r.Offset)
+		var fieldValues [][2]string
+		var obj map[string]string
+		if err := json.Unmarshal(r.Value, &obj); err == nil && len(obj) > 0 {
+			for k, v := range obj {
+				fieldValues = append(fieldValues, [2]string{k, v})
+			}
+		} else {
+			fieldValues = append(fieldValues, [2]string{"payload", string(r.Value)})
+		}
+		entries = append(entries, EncodeStreamEntry(id, fieldValues))
+	}
+
+	out := new(strings.Builder)
+	out.WriteString("*1\r\n*2\r\n")
+	out.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(streamName), streamName))
+	out.WriteString(fmt.Sprintf("*%d\r\n", len(entries)))
+	for _, e := range entries {
+		out.Write(e)
+	}
+	return []byte(out.String())
 }
 
 // Close gracefully stops the Redis protocol server.

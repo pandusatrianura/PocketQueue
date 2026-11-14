@@ -15,7 +15,10 @@ import (
 const MaxPartitionsPerTopic int32 = 16
 
 // ErrPartitionLimitExceeded indicates requested partition exceeds the maximum allowable limit.
-var ErrPartitionLimitExceeded = errors.New("partition limit exceeded")
+var (
+	ErrPartitionLimitExceeded = errors.New("partition limit exceeded")
+	ErrTopicAlreadyExists     = errors.New("topic already exists")
+)
 
 // TopicMetadata holds runtime information about a topic and its partitions.
 type TopicMetadata struct {
@@ -98,6 +101,36 @@ func (s *Service) EnsureTopic(topic string, partitions int32) int32 {
 	}
 
 	return cur
+}
+
+// CreateTopic explicitly registers a new topic with requested partition count.
+func (s *Service) CreateTopic(topic string, partitions int32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.topics[topic]; exists {
+		return ErrTopicAlreadyExists
+	}
+	if partitions <= 0 {
+		partitions = s.defaultPartitions
+	}
+	if partitions > MaxPartitionsPerTopic {
+		return ErrPartitionLimitExceeded
+	}
+	s.topics[topic] = partitions
+	return nil
+}
+
+// DeleteTopic removes a topic from the broker registry.
+func (s *Service) DeleteTopic(topic string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.topics[topic]; !exists {
+		return false
+	}
+	delete(s.topics, topic)
+	return true
 }
 
 // Produce appends a record to the specified topic partition and broadcasts it to the EventBus.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -159,4 +160,59 @@ func main() {
 		cancel()
 		fmt.Println("\nShutting down PocketQueue gracefully...")
 	}
+
+	if cfg.ExportPath != "" {
+		if err := exportBrokerData(brokerSvc, cfg.ExportPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error exporting data to %s: %v\n", cfg.ExportPath, err)
+		} else {
+			fmt.Printf("✅ Exported messages to %s\n", cfg.ExportPath)
+		}
+	}
+}
+
+type exportItem struct {
+	Topic     string            `json:"topic"`
+	Partition int32             `json:"partition"`
+	Offset    int64             `json:"offset"`
+	Key       string            `json:"key"`
+	Value     string            `json:"value"`
+	Timestamp string            `json:"timestamp"`
+	Headers   map[string]string `json:"headers,omitempty"`
+}
+
+func exportBrokerData(b *broker.Service, filename string) error {
+	ctx := context.Background()
+	topics, err := b.ListTopics(ctx)
+	if err != nil {
+		return err
+	}
+	var allRecords []exportItem
+	for topic, numParts := range topics {
+		for p := int32(0); p < numParts; p++ {
+			records, err := b.Fetch(ctx, topic, p, 0, 10000)
+			if err != nil {
+				continue
+			}
+			for _, r := range records {
+				headers := make(map[string]string, len(r.Headers))
+				for _, h := range r.Headers {
+					headers[h.Key] = string(h.Value)
+				}
+				allRecords = append(allRecords, exportItem{
+					Topic:     r.Topic,
+					Partition: r.Partition,
+					Offset:    r.Offset,
+					Key:       string(r.Key),
+					Value:     string(r.Value),
+					Timestamp: r.Timestamp.Format(time.RFC3339),
+					Headers:   headers,
+				})
+			}
+		}
+	}
+	data, err := json.MarshalIndent(allRecords, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filename, data, 0644)
 }

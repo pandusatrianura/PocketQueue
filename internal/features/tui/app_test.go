@@ -1,6 +1,8 @@
 package tui_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -155,6 +157,124 @@ func TestAppModel_HighIngressBurstThrottling(t *testing.T) {
 	view := m.View()
 	if !strings.Contains(view, "POCKETQUEUE") {
 		t.Errorf("expected view to contain header after burst, got: %s", view)
+	}
+}
+
+func TestTUI_LiveFilter(t *testing.T) {
+	engine := storage.NewMemoryEngine(100)
+	bus := broker.NewEventBus(50)
+	svc := broker.NewService(engine, bus, 1)
+
+	model := tui.NewAppModel(svc, bus, 100)
+	m, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	// Add test events via eventbus
+	bus.Publish(storage.Record{Topic: "orders", Partition: 0, Offset: 0, Key: []byte("ord-1"), Value: []byte(`{"sku":"A1"}`), Timestamp: time.Now()})
+	bus.Publish(storage.Record{Topic: "telemetry", Partition: 0, Offset: 0, Key: []byte("dev-1"), Value: []byte(`{"temp":24}`), Timestamp: time.Now()})
+	bus.Publish(storage.Record{Topic: "orders", Partition: 0, Offset: 1, Key: []byte("ord-2"), Value: []byte(`{"sku":"B2"}`), Timestamp: time.Now()})
+
+	// Process 3 events
+	cmd := m.Init()
+	for i := 0; i < 3; i++ {
+		if cmd == nil {
+			break
+		}
+		msg := cmd()
+		var nextCmd tea.Cmd
+		m, nextCmd = m.Update(msg)
+		cmd = nextCmd
+	}
+
+	// 1. Enter search modal via '/'
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	view := m.View()
+	if !strings.Contains(view, "🔍") {
+		t.Errorf("expected search prompt in view, got: %s", view)
+	}
+
+	// 2. Type 'orders' into search and hit enter
+	for _, r := range "orders" {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	filteredView := m.View()
+	if !strings.Contains(filteredView, "orders") {
+		t.Errorf("expected 'orders' to be present in filtered view")
+	}
+	if !strings.Contains(filteredView, "Filter:") {
+		t.Errorf("expected status to show active filter, got: %s", filteredView)
+	}
+
+	// 3. Clear filter via 'esc'
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	clearedView := m.View()
+	if strings.Contains(clearedView, "[Filter:") {
+		t.Errorf("expected filter to be cleared, got: %s", clearedView)
+	}
+}
+
+func TestTUI_PauseAndClear(t *testing.T) {
+	engine := storage.NewMemoryEngine(100)
+	bus := broker.NewEventBus(50)
+	svc := broker.NewService(engine, bus, 1)
+
+	model := tui.NewAppModel(svc, bus, 100)
+	m, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	bus.Publish(storage.Record{Topic: "stream-a", Partition: 0, Offset: 0, Key: []byte("k1"), Value: []byte("v1"), Timestamp: time.Now()})
+	cmd := m.Init()
+	if cmd != nil {
+		m, _ = m.Update(cmd())
+	}
+
+	// 1. Toggle pause with ' ' (space)
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	pausedView := m.View()
+	if !strings.Contains(pausedView, "PAUSED") {
+		t.Errorf("expected PAUSED indicator in view, got: %s", pausedView)
+	}
+
+	// Toggle unpause
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	resumedView := m.View()
+	if strings.Contains(resumedView, "[PAUSED]") {
+		t.Errorf("expected PAUSED indicator to be removed after toggle")
+	}
+
+	// 2. Clear stream with 'c'
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	clearedView := m.View()
+	if !strings.Contains(clearedView, "Stream display cleared") {
+		t.Errorf("expected stream display cleared status, got: %s", clearedView)
+	}
+}
+
+func TestTUI_Export(t *testing.T) {
+	engine := storage.NewMemoryEngine(100)
+	bus := broker.NewEventBus(50)
+	svc := broker.NewService(engine, bus, 1)
+
+	model := tui.NewAppModel(svc, bus, 100)
+	m, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	bus.Publish(storage.Record{Topic: "export-test", Partition: 0, Offset: 0, Key: []byte("k"), Value: []byte(`{"hello":"world"}`), Timestamp: time.Now()})
+	cmd := m.Init()
+	if cmd != nil {
+		m, _ = m.Update(cmd())
+	}
+
+	// Trigger export via 'w'
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	view := m.View()
+	if !strings.Contains(view, "Exported") {
+		t.Errorf("expected export confirmation in status bar, got: %s", view)
+	}
+
+	// Clean up dumped test files
+	matches, _ := filepath.Glob("pocketqueue-dump-*.json")
+	for _, f := range matches {
+		_ = os.Remove(f)
 	}
 }
 

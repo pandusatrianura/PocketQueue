@@ -2,6 +2,7 @@ package kafka_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -602,5 +603,164 @@ func TestKafkaServer_ProduceStorageErrorOnWALCap(t *testing.T) {
 	errCode, _ := dec.GetInt16()
 	if errCode != kafka.ErrKafkaStorageError {
 		t.Fatalf("expected ErrKafkaStorageError (56), got %d", errCode)
+	}
+}
+
+func TestKafkaServer_CreateAndDeleteTopics(t *testing.T) {
+	engine := storage.NewMemoryEngine(100)
+	bus := broker.NewEventBus(10)
+	svc := broker.NewService(engine, bus, 1)
+
+	handler := kafka.NewHandler(svc, "127.0.0.1", 9092, nil)
+	server := kafka.NewServer("127.0.0.1:0", handler, nil)
+
+	if err := server.Start(); err != nil {
+		t.Fatalf("failed to start kafka server: %v", err)
+	}
+	defer server.Close()
+
+	conn, err := net.DialTimeout("tcp", server.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("failed to dial server: %v", err)
+	}
+	defer conn.Close()
+
+	// 1. Send CreateTopics for "custom-orders" with 2 partitions
+	reqBuf := new(bytes.Buffer)
+	enc := kafka.NewEncoder(reqBuf)
+	enc.PutInt16(kafka.ApiKeyCreateTopics)
+	enc.PutInt16(2)    // version 2
+	enc.PutInt32(8881) // correlation ID
+	enc.PutString("admin-client")
+
+	// CreateTopics body: 1 topic
+	enc.PutInt32(1)
+	enc.PutString("custom-orders")
+	enc.PutInt32(2) // 2 partitions
+	enc.PutInt16(1) // replication 1
+	enc.PutInt32(0) // 0 manual replica assignments
+	enc.PutInt32(0) // 0 configs
+	enc.PutInt32(5000) // timeout ms
+
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(reqBuf.Len()))
+	_, _ = conn.Write(lenBuf[:])
+	_, _ = conn.Write(reqBuf.Bytes())
+
+	// Read response
+	var respLenBuf [4]byte
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(conn, respLenBuf[:]); err != nil {
+		t.Fatalf("failed to read create response length: %v", err)
+	}
+	respLen := int(binary.BigEndian.Uint32(respLenBuf[:]))
+	respPayload := make([]byte, respLen)
+	if _, err := io.ReadFull(conn, respPayload); err != nil {
+		t.Fatalf("failed to read create response payload: %v", err)
+	}
+
+	dec := kafka.NewDecoder(respPayload)
+	corrId, _ := dec.GetInt32()
+	if corrId != 8881 {
+		t.Errorf("expected correlation ID 8881, got %d", corrId)
+	}
+	_, _ = dec.GetInt32() // ThrottleTimeMs (v2)
+	topicsCount, _ := dec.GetInt32()
+	if topicsCount != 1 {
+		t.Fatalf("expected 1 topic result, got %d", topicsCount)
+	}
+	tName, _ := dec.GetString()
+	if tName != "custom-orders" {
+		t.Errorf("expected topic custom-orders, got %s", tName)
+	}
+	tErr, _ := dec.GetInt16()
+	if tErr != kafka.ErrNone {
+		t.Fatalf("expected ErrNone (0), got %d", tErr)
+	}
+
+	// Verify topic exists in broker with 2 partitions
+	meta, err := svc.GetTopicMetadata(context.Background(), "custom-orders")
+	if err != nil || len(meta.Partitions) != 2 {
+		t.Fatalf("expected 2 partitions in broker, got %v", meta)
+	}
+
+	// 2. Send CreateTopics again -> Expect ErrTopicAlreadyExists (36)
+	reqBuf.Reset()
+	enc = kafka.NewEncoder(reqBuf)
+	enc.PutInt16(kafka.ApiKeyCreateTopics)
+	enc.PutInt16(2)
+	enc.PutInt32(8882)
+	enc.PutString("admin-client")
+	enc.PutInt32(1)
+	enc.PutString("custom-orders")
+	enc.PutInt32(2)
+	enc.PutInt16(1)
+	enc.PutInt32(0)
+	enc.PutInt32(0)
+	enc.PutInt32(5000)
+
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(reqBuf.Len()))
+	_, _ = conn.Write(lenBuf[:])
+	_, _ = conn.Write(reqBuf.Bytes())
+
+	if _, err := io.ReadFull(conn, respLenBuf[:]); err != nil {
+		t.Fatalf("failed to read duplicate create response length: %v", err)
+	}
+	respLen = int(binary.BigEndian.Uint32(respLenBuf[:]))
+	respPayload = make([]byte, respLen)
+	if _, err := io.ReadFull(conn, respPayload); err != nil {
+		t.Fatalf("failed to read duplicate create response payload: %v", err)
+	}
+
+	dec = kafka.NewDecoder(respPayload)
+	_, _ = dec.GetInt32() // corrId
+	_, _ = dec.GetInt32() // throttle
+	_, _ = dec.GetInt32() // count
+	_, _ = dec.GetString() // topic
+	dupErr, _ := dec.GetInt16()
+	if dupErr != kafka.ErrTopicAlreadyExists {
+		t.Errorf("expected ErrTopicAlreadyExists (36), got %d", dupErr)
+	}
+
+	// 3. Send DeleteTopics for "custom-orders"
+	delBuf := new(bytes.Buffer)
+	dEnc := kafka.NewEncoder(delBuf)
+	dEnc.PutInt16(kafka.ApiKeyDeleteTopics)
+	dEnc.PutInt16(1)    // version 1
+	dEnc.PutInt32(8883) // correlation ID
+	dEnc.PutString("admin-client")
+	dEnc.PutInt32(1)
+	dEnc.PutString("custom-orders")
+	dEnc.PutInt32(5000)
+
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(delBuf.Len()))
+	_, _ = conn.Write(lenBuf[:])
+	_, _ = conn.Write(delBuf.Bytes())
+
+	if _, err := io.ReadFull(conn, respLenBuf[:]); err != nil {
+		t.Fatalf("failed to read delete response length: %v", err)
+	}
+	respLen = int(binary.BigEndian.Uint32(respLenBuf[:]))
+	respPayload = make([]byte, respLen)
+	if _, err := io.ReadFull(conn, respPayload); err != nil {
+		t.Fatalf("failed to read delete response payload: %v", err)
+	}
+
+	dec = kafka.NewDecoder(respPayload)
+	_, _ = dec.GetInt32() // corrId
+	_, _ = dec.GetInt32() // throttle
+	_, _ = dec.GetInt32() // count
+	delTopic, _ := dec.GetString()
+	if delTopic != "custom-orders" {
+		t.Errorf("expected deleted topic custom-orders, got %s", delTopic)
+	}
+	delErr, _ := dec.GetInt16()
+	if delErr != kafka.ErrNone {
+		t.Errorf("expected delete error code 0, got %d", delErr)
+	}
+
+	// Verify topic was deleted from broker
+	if _, err := svc.GetTopicMetadata(context.Background(), "custom-orders"); err == nil {
+		t.Error("expected topic to be deleted from broker")
 	}
 }

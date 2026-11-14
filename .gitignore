@@ -19,11 +19,15 @@ e2e_demo/
 *.out
 coverage.html
 
-# Vendor dependencies
+# Vendor & package dependencies
 vendor/
+node_modules/
+__pycache__/
+*.pyc
 
 # Artifacts & planning docs
 artifacts/superpowers/
+pocketqueue-dump-*.json
 
 # Workflows
 .github/workflows/*

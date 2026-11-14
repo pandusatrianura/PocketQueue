@@ -50,6 +50,33 @@ Running Kafka, Zookeeper, or RabbitMQ on local dev machines consumes **1.5–3 G
 
 ### 1. Installation
 
+#### Homebrew (macOS / Linux):
+```bash
+brew install pandusatrianura/tap/pocketqueue
+```
+
+#### Scoop (Windows):
+```powershell
+scoop bucket add pocketqueue https://github.com/pandusatrianura/pocketqueue
+scoop install pocketqueue
+```
+
+#### Docker (< 8 MB Ultra-Minimal Scratch Image):
+```bash
+docker run -d -p 9092:9092 -p 6379:6379 ghcr.io/pandusatrianura/pocketqueue:latest
+```
+
+#### Docker Compose (Drop-In Microservices Replacement):
+Download or reference [`docker-compose.example.yml`](docker-compose.example.yml):
+```yaml
+services:
+  pocketqueue:
+    image: ghcr.io/pandusatrianura/pocketqueue:latest
+    ports:
+      - "9092:9092" # Kafka wire protocol
+      - "6379:6379" # Redis Streams wire protocol
+```
+
 #### Build from source:
 ```bash
 git clone https://github.com/pandusatrianura/pocketqueue.git
@@ -122,6 +149,10 @@ PocketQueue is continuously tested against official production client libraries 
 |---|---|---|---|:---:|
 | **Go** | [`IBM/sarama`](https://github.com/IBM/sarama) | Kafka `:9092` | `SyncProducer`, `Consumer`, `ConsumerGroup`, RecordBatch v2 | ✅ Verified |
 | **Go** | [`redis/go-redis/v9`](https://github.com/redis/go-redis/v9) | Redis Streams `:6379` | `Ping`, `XAdd`, `XLen`, `XRange`, `XRead` (with `Block`) | ✅ Verified |
+| **Python** | [`redis-py`](https://github.com/redis/redis-py) | Redis Streams `:6379` | `xadd`, `xlen`, `xrange`, `xgroup_create`, `xreadgroup`, `xack`, `xrevrange`, `xdel` | ✅ Verified |
+| **Python** | Standard Library Socket | Kafka `:9092` | `ApiVersions`, `Metadata`, `CreateTopics` (API 19), `DeleteTopics` (API 20) | ✅ Verified |
+| **Node.js** | [`ioredis`](https://github.com/redis/ioredis) | Redis Streams `:6379` | `xadd`, `xlen`, `xrange`, `xgroup`, `xreadgroup`, `xack`, `xrevrange`, `xdel` | ✅ Verified |
+| **Node.js** | Standard `net` Socket | Kafka `:9092` | `ApiVersions`, `Metadata`, `CreateTopics` (API 19), `DeleteTopics` (API 20) | ✅ Verified |
 
 #### Go Example: Producing & Consuming with `IBM/sarama`
 ```go
@@ -177,6 +208,8 @@ PocketQueue requires zero configuration by default, but provides fine-grained co
 | `--max-messages` | `5000` | In-memory buffer size per partition | Increase to `20000` for high-throughput stress tests |
 | `--log-level` | `info` | Log verbosity (`debug`, `info`, `warn`, `error`) | Use `debug` when diagnosing client handshakes |
 | `--json-log` | `false` | Format logs as structured JSON | Recommended for CI/CD and container logs |
+| `--export` | `""` (Empty) | Dump topic events to JSON on shutdown | Save event stream fixtures or share test recordings |
+| `--kafka-port` | `9092` | Kafka port (alias for `--port`) | Standard Kafka port (`0` to disable Kafka) |
 
 ---
 
@@ -251,10 +284,14 @@ services:
 |---|---|
 | `Tab` | Switch between **Live Stream** table and **Topics & DLQ** statistics |
 | `↑` / `↓` (`k` / `j`) | Navigate message history |
+| `/` | **Live Filter / Quick Search**: filter stream in real time by topic or payload substring |
+| `Space` | **Pause / Resume Auto-Scroll**: freeze viewport for inspection without losing new incoming events |
+| `c` | **Clear Stream Display**: reset viewport table for a fresh test session |
+| `w` | **Export Snapshot**: dump current in-memory events to `pocketqueue-dump-<timestamp>.json` |
 | `Enter` | Open **Payload Inspector Modal** (auto-formats JSON and inspects headers) |
 | `r` / `e` | Open **Replay Studio Modal** to edit JSON payload in-place |
 | `Ctrl+S` | Submit and republish replayed message into topic |
-| `Esc` | Close modal / return to stream |
+| `Esc` | Close modal / clear filter / return to stream |
 | `q` / `Ctrl+C` | Graceful shutdown |
 
 ---

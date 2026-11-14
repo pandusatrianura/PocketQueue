@@ -1,0 +1,12 @@
+{
+  "name": "pocketqueue-compatibility-nodejs",
+  "version": "1.0.0",
+  "description": "Node.js compatibility test suite for PocketQueue",
+  "main": "test_redis.js",
+  "scripts": {
+    "test": "node test_redis.js && node test_kafka.js"
+  },
+  "dependencies": {
+    "ioredis": "^5.4.1"
+  }
+}

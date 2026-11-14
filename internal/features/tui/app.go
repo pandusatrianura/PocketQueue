@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/pandusatrianura/pocketqueue/internal/features/broker"
@@ -30,6 +32,7 @@ const (
 	modalNone modalMode = iota
 	modalInspect
 	modalReplay
+	modalSearch
 )
 
 type recordArrivedMsg storage.Record
@@ -50,16 +53,20 @@ type AppModel struct {
 	modal     modalMode
 
 	// Live Stream State
-	messages []storage.Record
-	maxMsgs  int
-	table    table.Model
+	messages     []storage.Record
+	filteredMsgs []storage.Record
+	filterQuery  string
+	paused       bool
+	maxMsgs      int
+	table        table.Model
 
 	// Topics View State
 	topicTable table.Model
 
-	// Inspector / Replay Modals
+	// Inspector / Replay / Search Modals
 	selectedMsg *storage.Record
 	replayText  textarea.Model
+	searchInput textinput.Model
 	statusMsg   string
 	lastRefresh time.Time
 }
@@ -125,19 +132,26 @@ func NewAppModel(b *broker.Service, eb *broker.EventBus, maxMessages int) *AppMo
 	ta.SetWidth(60)
 	ta.SetHeight(10)
 
+	ti := textinput.New()
+	ti.Placeholder = "Type to filter by topic, key, or payload..."
+	ti.CharLimit = 100
+	ti.Width = 50
+
 	return &AppModel{
-		broker:      b,
-		eventBus:    eb,
-		subCh:       subCh,
-		unsub:       unsub,
-		activeTab:   tabStream,
-		modal:       modalNone,
-		messages:    make([]storage.Record, 0, maxMessages),
-		maxMsgs:     maxMessages,
-		table:       t,
-		topicTable:  topTable,
-		replayText:  ta,
-		statusMsg:   "PocketQueue Live • Port 9092",
+		broker:       b,
+		eventBus:     eb,
+		subCh:        subCh,
+		unsub:        unsub,
+		activeTab:    tabStream,
+		modal:        modalNone,
+		messages:     make([]storage.Record, 0, maxMessages),
+		filteredMsgs: make([]storage.Record, 0, maxMessages),
+		maxMsgs:      maxMessages,
+		table:        t,
+		topicTable:   topTable,
+		replayText:   ta,
+		searchInput:  ti,
+		statusMsg:    "PocketQueue Live • Port 9092",
 	}
 }
 
@@ -193,6 +207,31 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch m.modal {
+		case modalSearch:
+			switch msg.String() {
+			case "enter":
+				m.filterQuery = strings.TrimSpace(strings.ToLower(m.searchInput.Value()))
+				m.modal = modalNone
+				m.refreshStreamRows()
+				if m.filterQuery != "" {
+					m.statusMsg = fmt.Sprintf("🔍 Filter: %q (%d matching events)", m.filterQuery, len(m.filteredMsgs))
+				} else {
+					m.statusMsg = "Filter cleared"
+				}
+				return m, nil
+			case "esc":
+				m.searchInput.SetValue("")
+				m.filterQuery = ""
+				m.modal = modalNone
+				m.refreshStreamRows()
+				m.statusMsg = "Filter cleared"
+				return m, nil
+			default:
+				var tiCmd tea.Cmd
+				m.searchInput, tiCmd = m.searchInput.Update(msg)
+				return m, tiCmd
+			}
+
 		case modalInspect:
 			if msg.String() == "esc" || msg.String() == "enter" || msg.String() == "q" {
 				m.modal = modalNone
@@ -225,6 +264,42 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.unsub()
 				}
 				return m, tea.Quit
+			case "/":
+				m.modal = modalSearch
+				m.searchInput.SetValue(m.filterQuery)
+				m.searchInput.Focus()
+				return m, textinput.Blink
+			case " ":
+				m.paused = !m.paused
+				if m.paused {
+					m.statusMsg = "⏸️ Stream paused [Press Space to resume]"
+				} else {
+					m.statusMsg = "▶️ Stream resumed"
+					m.refreshStreamRows()
+				}
+				return m, nil
+			case "c":
+				m.messages = m.messages[:0]
+				m.filteredMsgs = m.filteredMsgs[:0]
+				m.refreshStreamRows()
+				m.statusMsg = "Stream display cleared (broker data preserved)"
+				return m, nil
+			case "w":
+				filename := fmt.Sprintf("pocketqueue-dump-%s.json", time.Now().Format("20060102-150405"))
+				if err := m.ExportMessages(filename); err != nil {
+					m.statusMsg = fmt.Sprintf("❌ Export failed: %v", err)
+				} else {
+					m.statusMsg = fmt.Sprintf("✅ Exported %d events to %s", len(m.messages), filename)
+				}
+				return m, nil
+			case "esc":
+				if m.filterQuery != "" {
+					m.filterQuery = ""
+					m.searchInput.SetValue("")
+					m.refreshStreamRows()
+					m.statusMsg = "Filter cleared"
+					return m, nil
+				}
 			case "tab":
 				if m.activeTab == tabStream {
 					m.activeTab = tabTopics
@@ -277,9 +352,32 @@ func (m *AppModel) updateSizes() {
 	m.replayText.SetWidth(m.width - 20)
 }
 
+func (m *AppModel) currentDisplayMessages() []storage.Record {
+	if m.filterQuery == "" {
+		return m.messages
+	}
+	return m.filteredMsgs
+}
+
 func (m *AppModel) refreshStreamRows() {
-	rows := make([]table.Row, len(m.messages))
-	for i, r := range m.messages {
+	var displayMsgs []storage.Record
+	if m.filterQuery == "" {
+		displayMsgs = m.messages
+	} else {
+		m.filteredMsgs = m.filteredMsgs[:0]
+		q := strings.ToLower(m.filterQuery)
+		for _, r := range m.messages {
+			if strings.Contains(strings.ToLower(r.Topic), q) ||
+				strings.Contains(strings.ToLower(string(r.Key)), q) ||
+				strings.Contains(strings.ToLower(string(r.Value)), q) {
+				m.filteredMsgs = append(m.filteredMsgs, r)
+			}
+		}
+		displayMsgs = m.filteredMsgs
+	}
+
+	rows := make([]table.Row, len(displayMsgs))
+	for i, r := range displayMsgs {
 		timeStr := r.Timestamp.Format("15:04:05")
 		keyStr := string(r.Key)
 		if keyStr == "" {
@@ -307,8 +405,13 @@ func (m *AppModel) refreshStreamRows() {
 		}
 	}
 	m.table.SetRows(rows)
-	// Auto scroll to latest if selected at end
-	if len(rows) > 0 && m.table.Cursor() >= len(rows)-2 {
+
+	// Clamp and update cursor safely
+	if len(rows) == 0 {
+		m.table.SetCursor(0)
+	} else if m.table.Cursor() >= len(rows) {
+		m.table.SetCursor(len(rows) - 1)
+	} else if !m.paused && m.table.Cursor() >= len(rows)-2 {
 		m.table.SetCursor(len(rows) - 1)
 	}
 }
@@ -352,21 +455,61 @@ func (m *AppModel) refreshTopicRows() {
 }
 
 func (m *AppModel) openInspectModal() {
+	msgs := m.currentDisplayMessages()
 	idx := m.table.Cursor()
-	if idx >= 0 && idx < len(m.messages) {
-		m.selectedMsg = &m.messages[idx]
+	if idx >= 0 && idx < len(msgs) {
+		m.selectedMsg = &msgs[idx]
 		m.modal = modalInspect
 	}
 }
 
 func (m *AppModel) openReplayModal() {
+	msgs := m.currentDisplayMessages()
 	idx := m.table.Cursor()
-	if idx >= 0 && idx < len(m.messages) {
-		m.selectedMsg = &m.messages[idx]
+	if idx >= 0 && idx < len(msgs) {
+		m.selectedMsg = &msgs[idx]
 		m.replayText.SetValue(string(m.selectedMsg.Value))
 		m.replayText.Focus()
 		m.modal = modalReplay
 	}
+}
+
+// ExportMessages dumps the current in-memory records to a formatted JSON file.
+func (m *AppModel) ExportMessages(filename string) error {
+	type exportRecord struct {
+		Topic     string            `json:"topic"`
+		Partition int32             `json:"partition"`
+		Offset    int64             `json:"offset"`
+		Key       string            `json:"key"`
+		Value     string            `json:"value"`
+		Timestamp string            `json:"timestamp"`
+		Headers   map[string]string `json:"headers,omitempty"`
+		IsDLQ     bool              `json:"is_dlq"`
+	}
+
+	records := make([]exportRecord, len(m.messages))
+	for i, r := range m.messages {
+		headers := make(map[string]string, len(r.Headers))
+		for _, h := range r.Headers {
+			headers[h.Key] = string(h.Value)
+		}
+		records[i] = exportRecord{
+			Topic:     r.Topic,
+			Partition: r.Partition,
+			Offset:    r.Offset,
+			Key:       string(r.Key),
+			Value:     string(r.Value),
+			Timestamp: r.Timestamp.Format(time.RFC3339),
+			Headers:   headers,
+			IsDLQ:     r.IsDLQ || strings.HasSuffix(r.Topic, ".dlq"),
+		}
+	}
+
+	data, err := json.MarshalIndent(records, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filename, data, 0644)
 }
 
 func (m *AppModel) executeReplay() bool {
@@ -448,11 +591,16 @@ func (m *AppModel) View() string {
 		sb.WriteString(m.renderReplayModal())
 	default:
 		if m.activeTab == tabStream {
-			if len(m.messages) == 0 {
+			msgs := m.currentDisplayMessages()
+			if len(msgs) == 0 {
+				notice := "No events yet. Point your Kafka client to localhost:9092 to stream messages in real-time."
+				if m.filterQuery != "" {
+					notice = fmt.Sprintf("No events match filter %q. (Press Esc to clear filter)", m.filterQuery)
+				}
 				emptyNotice := lipgloss.NewStyle().
 					Foreground(ColorMuted).
 					Padding(2, 4).
-					Render("No events yet. Point your Kafka client to localhost:9092 to stream messages in real-time.")
+					Render(notice)
 				sb.WriteString(emptyNotice + "\n")
 			} else {
 				sb.WriteString(m.table.View() + "\n")
@@ -460,17 +608,36 @@ func (m *AppModel) View() string {
 		} else {
 			sb.WriteString(m.topicTable.View() + "\n")
 		}
+
+		if m.modal == modalSearch {
+			searchBox := lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(ColorPrimary).
+				Padding(0, 1).
+				Render("🔍 " + m.searchInput.View())
+			sb.WriteString("\n" + searchBox + "\n")
+		}
 	}
 
 	// 4. Status Bar & Key Help
-	keyHelp := "Tab: Switch View • Enter: Inspect • r/e: Replay & Edit • q: Quit"
+	keyHelp := "/: Filter • Space: Pause • c: Clear • w: Export • Tab: Views • Enter: Inspect • r/e: Replay • q: Quit"
 	if m.modal == modalInspect {
 		keyHelp = "Esc/Enter: Close • r/e: Edit & Replay"
 	} else if m.modal == modalReplay {
 		keyHelp = "Ctrl+S: Submit Replay • Esc: Cancel"
+	} else if m.modal == modalSearch {
+		keyHelp = "Enter: Apply Filter • Esc: Clear & Exit"
 	}
 
-	sb.WriteString("\n" + StyleStatusBar.Render(fmt.Sprintf("%s | %s", m.statusMsg, keyHelp)))
+	statusText := m.statusMsg
+	if m.paused {
+		statusText = "⏸️ [PAUSED] " + statusText
+	}
+	if m.filterQuery != "" && m.modal != modalSearch {
+		statusText = fmt.Sprintf("[Filter: %s] %s", m.filterQuery, statusText)
+	}
+
+	sb.WriteString("\n" + StyleStatusBar.Render(fmt.Sprintf("%s | %s", statusText, keyHelp)))
 
 	return sb.String()
 }

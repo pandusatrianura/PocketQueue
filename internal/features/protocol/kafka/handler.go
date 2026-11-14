@@ -66,6 +66,10 @@ func (h *Handler) HandleRequest(ctx context.Context, header *RequestHeader, body
 		return h.handleHeartbeat(header, body)
 	case ApiKeyLeaveGroup:
 		return h.handleLeaveGroup(header, body)
+	case ApiKeyCreateTopics:
+		return h.handleCreateTopics(ctx, header, body)
+	case ApiKeyDeleteTopics:
+		return h.handleDeleteTopics(ctx, header, body)
 	default:
 		h.logger.WarnContext(ctx, "unsupported kafka api key", slog.Int("api_key", int(header.ApiKey)))
 		// Return empty response with correlation ID
@@ -566,6 +570,106 @@ func (h *Handler) handleLeaveGroup(header *RequestHeader, body []byte) ([]byte, 
 		CorrelationId: header.CorrelationId,
 		ThrottleTime:  0,
 		ErrorCode:     ErrNone,
+	}
+	return resp.Encode(header.ApiVersion), nil
+}
+
+func (h *Handler) handleCreateTopics(ctx context.Context, header *RequestHeader, body []byte) ([]byte, error) {
+	dec := NewDecoder(body)
+	topicsCount, err := dec.GetInt32()
+	if err != nil {
+		return nil, err
+	}
+
+	var topicErrors []CreateTopicError
+	for i := 0; i < int(topicsCount); i++ {
+		tName, _ := dec.GetString()
+		numPartitions, _ := dec.GetInt32()
+		replicationFactor, _ := dec.GetInt16()
+
+		// Skip replica assignment array
+		repAssignCount, _ := dec.GetInt32()
+		for j := 0; j < int(repAssignCount); j++ {
+			_, _ = dec.GetInt32() // partition id
+			replicasCount, _ := dec.GetInt32()
+			for k := 0; k < int(replicasCount); k++ {
+				_, _ = dec.GetInt32()
+			}
+		}
+
+		// Skip configs array
+		configsCount, _ := dec.GetInt32()
+		for j := 0; j < int(configsCount); j++ {
+			_, _ = dec.GetString() // config name
+			_, _ = dec.GetString() // config value
+		}
+
+		var errCode int16 = ErrNone
+		var errMsg *string
+		if numPartitions <= 0 {
+			errCode = ErrInvalidPartitions
+			msg := "number of partitions must be positive"
+			errMsg = &msg
+		} else if numPartitions > broker.MaxPartitionsPerTopic {
+			errCode = ErrInvalidPartitions
+			msg := fmt.Sprintf("number of partitions exceeds maximum allowed (%d)", broker.MaxPartitionsPerTopic)
+			errMsg = &msg
+		} else if replicationFactor < -1 || replicationFactor == 0 {
+			errCode = ErrInvalidReplication
+			msg := "replication factor must be positive or -1"
+			errMsg = &msg
+		} else {
+			err := h.broker.CreateTopic(tName, numPartitions)
+			if err != nil {
+				if errors.Is(err, broker.ErrTopicAlreadyExists) {
+					errCode = ErrTopicAlreadyExists
+					msg := fmt.Sprintf("topic '%s' already exists", tName)
+					errMsg = &msg
+				} else {
+					errCode = ErrInvalidPartitions
+					msg := err.Error()
+					errMsg = &msg
+				}
+			}
+		}
+
+		topicErrors = append(topicErrors, CreateTopicError{
+			Topic:        tName,
+			ErrorCode:    errCode,
+			ErrorMessage: errMsg,
+		})
+	}
+
+	resp := &CreateTopicsResponse{
+		CorrelationId: header.CorrelationId,
+		Topics:        topicErrors,
+	}
+	return resp.Encode(header.ApiVersion), nil
+}
+
+func (h *Handler) handleDeleteTopics(ctx context.Context, header *RequestHeader, body []byte) ([]byte, error) {
+	dec := NewDecoder(body)
+	topicsCount, err := dec.GetInt32()
+	if err != nil {
+		return nil, err
+	}
+
+	var topicErrors []DeleteTopicError
+	for i := 0; i < int(topicsCount); i++ {
+		tName, _ := dec.GetString()
+		errCode := ErrNone
+		if !h.broker.DeleteTopic(tName) {
+			errCode = ErrUnknownTopicOrPartition
+		}
+		topicErrors = append(topicErrors, DeleteTopicError{
+			Topic:     tName,
+			ErrorCode: errCode,
+		})
+	}
+
+	resp := &DeleteTopicsResponse{
+		CorrelationId: header.CorrelationId,
+		Topics:        topicErrors,
 	}
 	return resp.Encode(header.ApiVersion), nil
 }

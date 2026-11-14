@@ -1,0 +1,19 @@
+version: '3.8'
+
+# PocketQueue: Ultra-lightweight Kafka & Redis Streams drop-in replacement for local microservices
+services:
+  pocketqueue:
+    image: ghcr.io/pandusatrianura/pocketqueue:latest
+    container_name: pocketqueue
+    restart: unless-stopped
+    ports:
+      - "9092:9092" # Kafka wire protocol port
+      - "6379:6379" # Redis Streams wire protocol port
+    command: ["--headless", "--host", "0.0.0.0", "--kafka-port", "9092", "--redis-port", "6379"]
+    environment:
+      - POCKETQUEUE_LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9092 || exit 1"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
