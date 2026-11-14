@@ -9,6 +9,13 @@
 [![RAM Usage](https://img.shields.io/badge/Idle%20RAM-7.7%20MB-success)](scripts/audit.ps1)
 [![Boot Time](https://img.shields.io/badge/Cold%20Start-2.1%20ms-success)](scripts/audit.ps1)
 
+<p align="center">
+  <img src="docs/assets/pocketqueue-demo.gif" alt="PocketQueue TUI & DLQ Replay Studio Demo" width="850">
+</p>
+<p align="center">
+  <em>⚡ <strong>PocketQueue in action:</strong> Live Kafka & Redis Streams event streaming, JSON Payload Inspector, and in-terminal Dead-Letter Queue (DLQ) Replay Studio.</em>
+</p>
+
 ---
 
 ## 💡 Why PocketQueue?
