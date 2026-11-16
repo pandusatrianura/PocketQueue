@@ -33,6 +33,7 @@ const (
 	modalInspect
 	modalReplay
 	modalSearch
+	modalChaos
 )
 
 type recordArrivedMsg storage.Record
@@ -59,6 +60,10 @@ type AppModel struct {
 	paused       bool
 	maxMsgs      int
 	table        table.Model
+
+	// Traffic session recorder
+	recorder    *broker.TrafficRecorder
+	isRecording bool
 
 	// Topics View State
 	topicTable table.Model
@@ -188,6 +193,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case recordArrivedMsg:
 		rec := storage.Record(msg)
+		if m.isRecording && m.recorder != nil {
+			_ = m.recorder.Record(rec)
+		}
 		if len(m.messages) >= m.maxMsgs {
 			m.messages = append(m.messages[1:], rec)
 		} else {
@@ -257,13 +265,97 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.replayText, taCmd = m.replayText.Update(msg)
 			return m, taCmd
 
+		case modalChaos:
+			switch msg.String() {
+			case "esc", "q":
+				m.modal = modalNone
+				return m, nil
+			case "1":
+				if m.broker != nil && m.broker.Chaos() != nil {
+					m.broker.Chaos().UpdateConfig(broker.ChaosConfig{})
+				}
+				m.statusMsg = "🟢 Chaos disabled: clean network"
+				m.modal = modalNone
+				return m, nil
+			case "2":
+				cfg := broker.ChaosConfig{
+					LatencyMs:   200,
+					LatencyRate: 1.0,
+					DropRate:    0.10,
+				}
+				if m.broker != nil {
+					if m.broker.Chaos() == nil {
+						m.broker.SetChaos(broker.NewChaosEngine(cfg))
+					} else {
+						m.broker.Chaos().UpdateConfig(cfg)
+					}
+				}
+				m.statusMsg = "⚡ Preset 2 active: Flaky Network (200ms delay, 10% drop)"
+				m.modal = modalNone
+				return m, nil
+			case "3":
+				cfg := broker.ChaosConfig{
+					DuplicateRate: 0.20,
+				}
+				if m.broker != nil {
+					if m.broker.Chaos() == nil {
+						m.broker.SetChaos(broker.NewChaosEngine(cfg))
+					} else {
+						m.broker.Chaos().UpdateConfig(cfg)
+					}
+				}
+				m.statusMsg = "⚡ Preset 3 active: Duplicate Storm (20% duplicate rate)"
+				m.modal = modalNone
+				return m, nil
+			case "4":
+				cfg := broker.ChaosConfig{
+					LatencyMs:   500,
+					LatencyRate: 1.0,
+				}
+				if m.broker != nil {
+					if m.broker.Chaos() == nil {
+						m.broker.SetChaos(broker.NewChaosEngine(cfg))
+					} else {
+						m.broker.Chaos().UpdateConfig(cfg)
+					}
+				}
+				m.statusMsg = "⚡ Preset 4 active: High Latency (500ms delay 100%)"
+				m.modal = modalNone
+				return m, nil
+			}
+
 		case modalNone:
 			switch msg.String() {
 			case "q", "ctrl+c":
+				if m.recorder != nil {
+					_ = m.recorder.Close()
+				}
 				if m.unsub != nil {
 					m.unsub()
 				}
 				return m, tea.Quit
+			case "R":
+				if !m.isRecording {
+					filename := fmt.Sprintf("pocketqueue-session-%s.pqrec", time.Now().Format("20060102-150405"))
+					rec, err := broker.NewTrafficRecorder(filename)
+					if err != nil {
+						m.statusMsg = fmt.Sprintf("❌ Failed to start recording: %v", err)
+					} else {
+						m.recorder = rec
+						m.isRecording = true
+						m.statusMsg = fmt.Sprintf("🔴 Recording traffic to %s [Press Shift+R to stop]", filename)
+					}
+				} else {
+					if m.recorder != nil {
+						count := m.recorder.RecordedCount()
+						fn := m.recorder.FilePath()
+						_ = m.recorder.Close()
+						m.recorder = nil
+						m.isRecording = false
+						m.statusMsg = fmt.Sprintf("⏹️ Stopped recording: saved %d events to %s", count, fn)
+					}
+				}
+				return m, nil
 			case "/":
 				m.modal = modalSearch
 				m.searchInput.SetValue(m.filterQuery)
@@ -314,6 +406,9 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "r", "e":
 				m.openReplayModal()
+				return m, nil
+			case "x":
+				m.modal = modalChaos
 				return m, nil
 			}
 		}
@@ -589,6 +684,8 @@ func (m *AppModel) View() string {
 		sb.WriteString(m.renderInspectModal())
 	case modalReplay:
 		sb.WriteString(m.renderReplayModal())
+	case modalChaos:
+		sb.WriteString(m.renderChaosModal())
 	default:
 		if m.activeTab == tabStream {
 			msgs := m.currentDisplayMessages()
@@ -620,16 +717,24 @@ func (m *AppModel) View() string {
 	}
 
 	// 4. Status Bar & Key Help
-	keyHelp := "/: Filter • Space: Pause • c: Clear • w: Export • Tab: Views • Enter: Inspect • r/e: Replay • q: Quit"
+	keyHelp := "/: Filter • Space: Pause • c: Clear • w: Export • R: Record • x: Chaos • Tab: Views • Enter: Inspect • r/e: Replay • q: Quit"
 	if m.modal == modalInspect {
 		keyHelp = "Esc/Enter: Close • r/e: Edit & Replay"
 	} else if m.modal == modalReplay {
 		keyHelp = "Ctrl+S: Submit Replay • Esc: Cancel"
 	} else if m.modal == modalSearch {
 		keyHelp = "Enter: Apply Filter • Esc: Clear & Exit"
+	} else if m.modal == modalChaos {
+		keyHelp = "1-4: Select Preset • Esc: Close"
 	}
 
 	statusText := m.statusMsg
+	if m.broker != nil && m.broker.Chaos() != nil && m.broker.Chaos().Enabled() {
+		statusText = "⚡ [CHAOS] " + statusText
+	}
+	if m.isRecording && m.recorder != nil {
+		statusText = fmt.Sprintf("🔴 [REC: %d msgs] %s", m.recorder.RecordedCount(), statusText)
+	}
 	if m.paused {
 		statusText = "⏸️ [PAUSED] " + statusText
 	}
@@ -640,6 +745,27 @@ func (m *AppModel) View() string {
 	sb.WriteString("\n" + StyleStatusBar.Render(fmt.Sprintf("%s | %s", statusText, keyHelp)))
 
 	return sb.String()
+}
+
+func (m *AppModel) renderChaosModal() string {
+	var sb strings.Builder
+	title := lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Render("⚡ CHAOS & FAULT INJECTION STUDIO")
+	sb.WriteString(title + "\n\n")
+
+	currentStatus := "Disabled (Clean network)"
+	if m.broker != nil && m.broker.Chaos() != nil && m.broker.Chaos().Enabled() {
+		c := m.broker.Chaos().Config()
+		currentStatus = fmt.Sprintf("ACTIVE [Latency: %dms (%.0f%%), Drop: %.0f%%, Dup: %.0f%%]",
+			c.LatencyMs, c.LatencyRate*100, c.DropRate*100, c.DuplicateRate*100)
+	}
+	sb.WriteString(fmt.Sprintf("Current Status: %s\n\n", currentStatus))
+	sb.WriteString("Select a Chaos Fault Injection Preset:\n\n")
+	sb.WriteString("  [1] Clean / Normal     - Turn OFF all chaos simulation\n")
+	sb.WriteString("  [2] Flaky Network      - 200ms latency delay + 10% packet drop\n")
+	sb.WriteString("  [3] Duplicate Storm    - 20% duplicate delivery (at-least-once)\n")
+	sb.WriteString("  [4] High Latency       - 500ms latency delay (100% of requests)\n\n")
+	sb.WriteString("Press 1-4 to activate preset, or Esc to cancel.")
+	return StyleModal.Render(sb.String())
 }
 
 func (m *AppModel) renderInspectModal() string {

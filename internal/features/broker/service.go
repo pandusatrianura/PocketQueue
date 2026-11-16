@@ -44,6 +44,7 @@ type Service struct {
 	mu           sync.RWMutex
 	topics       map[string]int32                      // topicName -> partitionCount
 	groupOffsets map[string]map[string]map[int32]int64 // groupID -> topic -> partition -> offset
+	chaos        *ChaosEngine                          // optional chaos / fault injection engine
 	closed       bool
 }
 
@@ -70,6 +71,20 @@ func NewService(engine storage.Engine, eventBus *EventBus, defaultPartitions int
 	}
 
 	return svc
+}
+
+// SetChaos sets the chaos / fault injection engine.
+func (s *Service) SetChaos(c *ChaosEngine) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.chaos = c
+}
+
+// Chaos returns the active chaos engine if configured.
+func (s *Service) Chaos() *ChaosEngine {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.chaos
 }
 
 // EventBus returns the active EventBus instance for real-time pub/sub notifications.
@@ -142,6 +157,38 @@ func (s *Service) Produce(ctx context.Context, topic string, partition int32, ke
 		return nil, fmt.Errorf("%w: partition %d exceeds maximum limit of %d", ErrPartitionLimitExceeded, partition, MaxPartitionsPerTopic)
 	}
 
+	if c := s.Chaos(); c != nil && c.Enabled() {
+		shouldDrop, shouldDuplicate, delay := c.EvaluateProduce(ctx)
+		if delay > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		if shouldDrop {
+			return nil, ErrChaosDrop
+		}
+		if shouldDuplicate {
+			s.EnsureTopic(topic, partition+1)
+			rec1, err1 := s.storage.Append(ctx, topic, partition, key, value, headers)
+			if err1 != nil {
+				return nil, fmt.Errorf("storage append failed for topic %s: %w", topic, err1)
+			}
+			if s.eventBus != nil && (ctx == nil || ctx.Err() == nil) {
+				s.eventBus.Publish(*rec1)
+			}
+			rec2, err2 := s.storage.Append(ctx, topic, partition, key, value, headers)
+			if err2 != nil {
+				return rec1, nil
+			}
+			if s.eventBus != nil && (ctx == nil || ctx.Err() == nil) {
+				s.eventBus.Publish(*rec2)
+			}
+			return rec2, nil
+		}
+	}
+
 	s.EnsureTopic(topic, partition+1)
 
 	rec, err := s.storage.Append(ctx, topic, partition, key, value, headers)
@@ -164,6 +211,21 @@ func (s *Service) Fetch(ctx context.Context, topic string, partition int32, star
 	if partition >= MaxPartitionsPerTopic {
 		return nil, fmt.Errorf("%w: partition %d exceeds maximum limit of %d", ErrPartitionLimitExceeded, partition, MaxPartitionsPerTopic)
 	}
+
+	if c := s.Chaos(); c != nil && c.Enabled() {
+		shouldDrop, delay := c.EvaluateFetch(ctx)
+		if delay > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		if shouldDrop {
+			return nil, ErrChaosDrop
+		}
+	}
+
 	return s.storage.ReadFrom(ctx, topic, partition, startOffset, maxRecords)
 }
 
@@ -223,6 +285,28 @@ func (s *Service) GetOffset(ctx context.Context, groupID, topic string, partitio
 	}
 
 	return offset, nil
+}
+
+// ResetAllOffsets resets committed consumer group offsets to 0 for a given topic across all consumer groups.
+// If topic is empty, it resets offsets across all topics.
+func (s *Service) ResetAllOffsets(ctx context.Context, topic string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, topicMap := range s.groupOffsets {
+		if topic == "" {
+			for _, partMap := range topicMap {
+				for p := range partMap {
+					partMap[p] = 0
+				}
+			}
+		} else if partMap, exists := topicMap[topic]; exists {
+			for p := range partMap {
+				partMap[p] = 0
+			}
+		}
+	}
+	return nil
 }
 
 // SendToDLQ routes a failed message to a designated dead-letter queue topic (e.g. topic.dlq).

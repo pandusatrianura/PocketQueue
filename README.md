@@ -5,9 +5,9 @@
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/pandusatrianura/pocketqueue)](https://goreportcard.com/report/github.com/pandusatrianura/pocketqueue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Binary Size](https://img.shields.io/badge/Binary%20Size-4.96%20MB-success)](scripts/audit.ps1)
-[![RAM Usage](https://img.shields.io/badge/Idle%20RAM-7.7%20MB-success)](scripts/audit.ps1)
-[![Boot Time](https://img.shields.io/badge/Cold%20Start-2.1%20ms-success)](scripts/audit.ps1)
+[![Binary Size](https://img.shields.io/badge/Binary%20Size-5.21%20MB-success)](scripts/audit.ps1)
+[![RAM Usage](https://img.shields.io/badge/Idle%20RAM-7.9%20MB-success)](scripts/audit.ps1)
+[![Boot Time](https://img.shields.io/badge/Cold%20Start-2.2%20ms-success)](scripts/audit.ps1)
 
 <p align="center">
   <img src="docs/assets/pocketqueue-demo.gif" alt="PocketQueue TUI & DLQ Replay Studio Demo" width="850">
@@ -288,11 +288,90 @@ services:
 | `Space` | **Pause / Resume Auto-Scroll**: freeze viewport for inspection without losing new incoming events |
 | `c` | **Clear Stream Display**: reset viewport table for a fresh test session |
 | `w` | **Export Snapshot**: dump current in-memory events to `pocketqueue-dump-<timestamp>.json` |
+| `R` (`Shift+R`) | **Traffic Session Recording**: toggle live recording to `.pqrec` NDJSON file |
+| `x` | **Chaos & Fault Injection Studio**: toggle modal with live failure presets (Flaky Network, Duplicate Storm, High Latency) |
 | `Enter` | Open **Payload Inspector Modal** (auto-formats JSON and inspects headers) |
 | `r` / `e` | Open **Replay Studio Modal** to edit JSON payload in-place |
 | `Ctrl+S` | Submit and republish replayed message into topic |
 | `Esc` | Close modal / clear filter / return to stream |
 | `q` / `Ctrl+C` | Graceful shutdown |
+
+---
+
+## 🧪 Test Studio, Time-Travel Replay & Chaos Oracle
+
+PocketQueue is not just a lightweight broker for development—it is an **integrated testing platform** for event-driven architectures.
+
+### 1. Traffic Recording & Time-Travel Replay (`.pqrec`)
+Record incoming production or integration events and deterministically replay them locally for reproducing elusive bugs:
+
+- **Record live traffic**:
+  ```bash
+  ./bin/pocketqueue --record staging-session.pqrec
+  ```
+  *(Or simply press `Shift+R` anytime inside the interactive TUI).*
+
+- **Replay at custom speed**:
+  ```bash
+  # Replay at 2x speed (automatically resets consumer group offsets to 0)
+  ./bin/pocketqueue --replay staging-session.pqrec --replay-speed 2.0
+
+  # Replay preserving saved consumer group committed offsets
+  ./bin/pocketqueue --replay staging-session.pqrec --preserve-offsets
+  ```
+
+### 2. Chaos & Fault Injection Engine
+Stress-test your consumer resilience, idempotency, and retry loops without external proxies or kernel modifications:
+
+- **Launch with Chaos CLI Flags**:
+  ```bash
+  # Inject 200ms latency on 100% of requests, drop 10% of packets, duplicate 15% of produce events
+  ./bin/pocketqueue --chaos-latency 200 --chaos-latency-rate 1.0 --chaos-drop-rate 0.10 --chaos-duplicate-rate 0.15
+  ```
+
+- **Interactive TUI Chaos Studio (`x` key)**:
+  Press `x` in the TUI to open the Chaos Modal and switch between preconfigured scenarios on the fly:
+  - `[1] Clean / Normal`: Disable all chaos simulation
+  - `[2] Flaky Network`: 200ms latency delay + 10% packet drop
+  - `[3] Duplicate Storm`: 20% duplicate delivery to test consumer idempotency
+  - `[4] High Latency`: 500ms latency delay across 100% of requests
+
+### 3. Headless CI/CD Test Assertion Oracle (`pocketqueue test`)
+Replace slow, fragile polling scripts with a single command that validates asynchronous message delivery in CI pipelines:
+
+```bash
+# Wait up to 5s for payment-service to publish an event to 'orders' topic
+./bin/pocketqueue test \
+  --broker 127.0.0.1:9092 \
+  --expect-topic orders \
+  --expect-key ord-101 \
+  --expect-payload "paid" \
+  --timeout 5s
+```
+
+- Exits with `code 0` immediately upon match.
+- Exits with `code 1` on timeout or missing expectations.
+
+#### Example GitHub Actions CI Workflow:
+```yaml
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start PocketQueue Broker
+        run: |
+          curl -sSL https://github.com/pandusatrianura/pocketqueue/releases/latest/download/pocketqueue-linux-amd64.tar.gz | tar -xz
+          ./pocketqueue --headless --port 9092 &
+          sleep 1
+
+      - name: Run Application Under Test
+        run: ./gradlew testWorker &
+
+      - name: Assert Async Event Published
+        run: |
+          ./pocketqueue test --expect-topic orders --expect-payload "status\":\"completed" --timeout 10s
+```
 
 ---
 

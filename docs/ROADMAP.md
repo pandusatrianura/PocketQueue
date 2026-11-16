@@ -77,15 +77,36 @@ This roadmap outlines the evolution of PocketQueue while adhering strictly to th
 
 ## 🚀 Upcoming Milestones
 
-### Milestone 6: Webhook / HTTP Ingress Bridge (Optional Headless Adapter)
+### Milestone 6: PocketQueue Test Studio & Chaos Oracle ✅
+*Objective: Transform PocketQueue into an integrated local testing studio with traffic capture, time-travel replay, chaos fault injection, and headless CI assertion oracle.*
+- **Traffic Recording & Time-Travel Replay Engine (`.pqrec` NDJSON)**:
+  - Line-delimited NDJSON recording with microsecond delta timestamps.
+  - Zero-drift time-travel replay engine with configurable speed multipliers (`--replay-speed`).
+  - Consumer group offset reset auto-handling (with `--preserve-offsets` option).
+  - TUI session recording toggle via `Shift+R` (`R`) with live status bar badge `🔴 [REC: <n> msgs]`.
+- **Chaos & Fault Injection Engine**:
+  - Probabilistic fault injection for simulated network latency, packet drops, and at-least-once duplicate delivery.
+  - CLI flags: `-chaos-latency`, `-chaos-latency-rate`, `-chaos-drop-rate`, `-chaos-duplicate-rate`.
+  - Zero-cost check (< 1 ns branch) when chaos is disabled.
+  - Interactive TUI Chaos Studio modal (`x` key) with live presets (`Clean`, `Flaky Network`, `Duplicate Storm`, `High Latency`).
+- **Headless CI/CD Test Assertion Oracle (`pocketqueue test`)**:
+  - Single-binary test assertion runner communicating directly with Kafka wire protocol.
+  - Evaluates `--broker`, `--expect-topic`, `--expect-key`, `--expect-payload`, and `--timeout`.
+  - Exits with `code 0` on match and `code 1` on timeout for instant GitHub Actions integration testing.
+
+---
+
+## 🚀 Upcoming Milestones
+
+### Milestone 7: Webhook / HTTP Ingress Bridge (Optional Headless Adapter)
 - Expose lightweight REST / SSE endpoint on port `:8080` for event streaming into web browsers without custom clients.
 - Webhook trigger destination for Dead-Letter Queue event notifications.
 
 ---
 
 ## 🛡️ Boundary Invariants (Always Enforced)
-1. **Binary Size Ceiling**: `< 15.0 MB` (Current: `5.14 MB`).
-2. **Idle Memory Ceiling**: `< 25.0 MB` (Current: `7.93 MB`).
-3. **Cold Boot Ceiling**: `< 20.0 ms` (Current: `2.22 ms`).
+1. **Binary Size Ceiling**: `< 15.0 MB` (Current: `5.21 MB`).
+2. **Idle Memory Ceiling**: `< 25.0 MB` (Current: `7.91 MB`).
+3. **Cold Boot Ceiling**: `< 20.0 ms` (Current: `2.20 ms`).
 4. **Zero External Runtime Dependencies**: Pure Go, zero CGo, zero JVM, zero Docker required for operation.
 

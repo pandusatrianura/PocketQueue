@@ -22,6 +22,14 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "test" {
+		if err := runTestCommand(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Assertion Failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	bootStart := time.Now()
 	cfg := parseFlags()
 
@@ -75,6 +83,57 @@ func main() {
 	bus := broker.NewEventBus(1000)
 	brokerSvc := broker.NewService(engine, bus, 1)
 	defer brokerSvc.Close()
+
+	// If chaos flags are set, configure chaos engine
+	if cfg.ChaosLatency > 0 || cfg.ChaosDropRate > 0 || cfg.ChaosDuplicateRate > 0 {
+		chaosCfg := broker.ChaosConfig{
+			LatencyMs:     cfg.ChaosLatency,
+			LatencyRate:   cfg.ChaosLatencyRate,
+			DropRate:      cfg.ChaosDropRate,
+			DuplicateRate: cfg.ChaosDuplicateRate,
+		}
+		brokerSvc.SetChaos(broker.NewChaosEngine(chaosCfg))
+	}
+
+	// If --record is specified, record all live traffic to .pqrec file
+	var recorder *broker.TrafficRecorder
+	if cfg.RecordPath != "" {
+		var recErr error
+		recorder, recErr = broker.NewTrafficRecorder(cfg.RecordPath)
+		if recErr != nil {
+			fmt.Fprintf(os.Stderr, "Error initializing traffic recorder: %v\n", recErr)
+			os.Exit(1)
+		}
+		defer recorder.Close()
+
+		subCh, unsub := bus.Subscribe()
+		defer unsub()
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case rec, ok := <-subCh:
+					if !ok {
+						return
+					}
+					_ = recorder.Record(rec)
+				}
+			}
+		}()
+	}
+
+	// If --replay is specified, reproduce traffic session into broker
+	if cfg.ReplayPath != "" {
+		go func() {
+			time.Sleep(100 * time.Millisecond) // brief pause for servers to bind
+			replayer := broker.NewTrafficReplayer(cfg.ReplayPath, brokerSvc, cfg.ReplaySpeed, !cfg.PreserveOffsets)
+			count, err := replayer.Replay(ctx)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "Warning: traffic replay encountered error: %v (replayed %d msgs)\n", err, count)
+			}
+		}()
+	}
 
 	// If --demo is requested, start background demo event generator
 	if cfg.WithDemo {
@@ -154,8 +213,14 @@ func main() {
 			demoNote = " [Demo Active]"
 		}
 
-		fmt.Printf("⚡ PocketQueue running (%s, Storage: %s)%s (booted in %v, Press Ctrl+C to stop)\n",
-			endpoints, storageMode, demoNote, bootDuration)
+		chaosNote := ""
+		if brokerSvc.Chaos() != nil && brokerSvc.Chaos().Enabled() {
+			c := brokerSvc.Chaos().Config()
+			chaosNote = fmt.Sprintf(" [⚡ Chaos Active: latency=%dms (rate=%.2f), drop=%.2f, dup=%.2f]", c.LatencyMs, c.LatencyRate, c.DropRate, c.DuplicateRate)
+		}
+
+		fmt.Printf("⚡ PocketQueue running (%s, Storage: %s)%s%s (booted in %v, Press Ctrl+C to stop)\n",
+			endpoints, storageMode, demoNote, chaosNote, bootDuration)
 		<-sigChan
 		cancel()
 		fmt.Println("\nShutting down PocketQueue gracefully...")

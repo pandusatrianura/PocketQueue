@@ -278,3 +278,88 @@ func TestTUI_Export(t *testing.T) {
 	}
 }
 
+func TestTUI_SessionRecordingToggle(t *testing.T) {
+	engine := storage.NewMemoryEngine(100)
+	bus := broker.NewEventBus(50)
+	svc := broker.NewService(engine, bus, 1)
+
+	model := tui.NewAppModel(svc, bus, 100)
+	m, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	// 1. Start recording with 'R'
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	view := m.View()
+	if !strings.Contains(view, "Recording traffic") || !strings.Contains(view, "[REC:") {
+		t.Errorf("expected recording indicator, got: %s", view)
+	}
+
+	// 2. Publish record and process in TUI
+	bus.Publish(storage.Record{Topic: "rec-test", Partition: 0, Offset: 0, Key: []byte("k"), Value: []byte("v"), Timestamp: time.Now()})
+	cmd := m.Init()
+	if cmd != nil {
+		m, _ = m.Update(cmd())
+	}
+
+	// 3. Stop recording with 'R'
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	stoppedView := m.View()
+	if !strings.Contains(stoppedView, "Stopped recording") {
+		t.Errorf("expected stopped recording notice, got: %s", stoppedView)
+	}
+
+	// Clean up dumped test session files
+	matches, _ := filepath.Glob("pocketqueue-session-*.pqrec")
+	for _, f := range matches {
+		_ = os.Remove(f)
+	}
+}
+
+func TestTUI_ChaosModal(t *testing.T) {
+	engine := storage.NewMemoryEngine(100)
+	bus := broker.NewEventBus(50)
+	svc := broker.NewService(engine, bus, 1)
+
+	model := tui.NewAppModel(svc, bus, 100)
+	m, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	// 1. Press 'x' to open chaos modal
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	view := m.View()
+	if !strings.Contains(view, "CHAOS & FAULT INJECTION STUDIO") {
+		t.Fatalf("expected chaos studio modal, got: %s", view)
+	}
+
+	// 2. Select preset '2': Flaky Network
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	chaos := svc.Chaos()
+	if chaos == nil || !chaos.Enabled() {
+		t.Fatalf("expected chaos to be enabled after preset 2")
+	}
+	cfg := chaos.Config()
+	if cfg.LatencyMs != 200 || cfg.DropRate != 0.10 {
+		t.Fatalf("unexpected chaos config: %+v", cfg)
+	}
+
+	// Status bar should reflect active chaos
+	view = m.View()
+	if !strings.Contains(view, "⚡ [CHAOS]") {
+		t.Fatalf("expected ⚡ [CHAOS] in status bar, got: %s", view)
+	}
+
+	// 3. Open modal again with 'x' and select preset '1': Clean / Disable
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	if svc.Chaos().Enabled() {
+		t.Fatalf("expected chaos to be disabled after preset 1")
+	}
+
+	// 4. Open modal and press Esc to cancel
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	view = m.View()
+	if strings.Contains(view, "CHAOS & FAULT INJECTION STUDIO") {
+		t.Fatalf("expected chaos modal to be closed on Esc")
+	}
+}
+
+

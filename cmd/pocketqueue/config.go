@@ -18,6 +18,18 @@ type Config struct {
 	WithDemo    bool
 	ExportPath  string
 
+	// Traffic recording & replay options
+	RecordPath      string
+	ReplayPath      string
+	ReplaySpeed     float64
+	PreserveOffsets bool
+
+	// Chaos & Fault injection options
+	ChaosLatency       int
+	ChaosLatencyRate   float64
+	ChaosDropRate      float64
+	ChaosDuplicateRate float64
+
 	// Subcommand mode
 	Command      string
 	ProduceTopic string
@@ -41,6 +53,16 @@ func parseFlags() *Config {
 	flag.BoolVar(&cfg.JSONLog, "json-log", false, "Format logs as structured JSON")
 	flag.BoolVar(&cfg.WithDemo, "demo", false, "Emit simulated live traffic for testing / demonstration")
 	flag.StringVar(&cfg.ExportPath, "export", "", "Dump topic events to JSON file upon shutdown")
+
+	flag.StringVar(&cfg.RecordPath, "record", "", "File path to record live traffic session (.pqrec)")
+	flag.StringVar(&cfg.ReplayPath, "replay", "", "File path of .pqrec session to replay")
+	flag.Float64Var(&cfg.ReplaySpeed, "replay-speed", 1.0, "Replay speed multiplier (e.g. 0.5, 1.0, 2.0)")
+	flag.BoolVar(&cfg.PreserveOffsets, "preserve-offsets", false, "Preserve consumer group offsets on replay (default resets to 0)")
+
+	flag.IntVar(&cfg.ChaosLatency, "chaos-latency", 0, "Simulated network latency in milliseconds")
+	flag.Float64Var(&cfg.ChaosLatencyRate, "chaos-latency-rate", 1.0, "Fraction of requests affected by latency (0.0 to 1.0)")
+	flag.Float64Var(&cfg.ChaosDropRate, "chaos-drop-rate", 0.0, "Fraction of requests dropped to simulate packet loss (0.0 to 1.0)")
+	flag.Float64Var(&cfg.ChaosDuplicateRate, "chaos-duplicate-rate", 0.0, "Fraction of produce requests duplicated (0.0 to 1.0)")
 
 	flag.StringVar(&cfg.ProduceTopic, "topic", "", "Topic name for CLI producer")
 	flag.StringVar(&cfg.ProduceKey, "key", "", "Message key for CLI producer")
