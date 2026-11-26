@@ -241,3 +241,53 @@ func TestBrokerService_ContextCancellation(t *testing.T) {
 	}
 }
 
+func TestBrokerService_OffsetPersistenceAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	// 1. First broker instance with persistent offset store
+	mem1 := storage.NewMemoryEngine(100)
+	store1, err := broker.NewFileOffsetStore(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create FileOffsetStore: %v", err)
+	}
+
+	svc1 := broker.NewService(mem1, nil, 1)
+	if err := svc1.SetOffsetStore(store1); err != nil {
+		t.Fatalf("failed to set offset store on svc1: %v", err)
+	}
+
+	// Commit offset 42 on partition 0
+	if err := svc1.CommitOffset(ctx, "cg-orders", "orders-topic", 0, 42); err != nil {
+		t.Fatalf("failed to commit offset: %v", err)
+	}
+
+	// Gracefully close svc1 (triggers flush)
+	if err := svc1.Close(); err != nil {
+		t.Fatalf("failed to close svc1: %v", err)
+	}
+
+	// 2. Second broker instance simulating restart
+	mem2 := storage.NewMemoryEngine(100)
+	store2, err := broker.NewFileOffsetStore(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create store2: %v", err)
+	}
+
+	svc2 := broker.NewService(mem2, nil, 1)
+	defer svc2.Close()
+	if err := svc2.SetOffsetStore(store2); err != nil {
+		t.Fatalf("failed to set offset store on svc2: %v", err)
+	}
+
+	// Get offset back - must be 42
+	off, err := svc2.GetOffset(ctx, "cg-orders", "orders-topic", 0)
+	if err != nil {
+		t.Fatalf("failed to get offset: %v", err)
+	}
+	if off != 42 {
+		t.Fatalf("expected restored offset 42 across broker restart, got: %d", off)
+	}
+}
+
+

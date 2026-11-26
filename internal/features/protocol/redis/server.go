@@ -56,6 +56,7 @@ type Server struct {
 	wg     sync.WaitGroup
 	mu     sync.Mutex
 	closed bool
+	conns  map[net.Conn]struct{}
 }
 
 // NewServer creates a new Redis Streams server.
@@ -70,6 +71,7 @@ func NewServer(addr string, b *broker.Service, l *slog.Logger) *Server {
 		logger: l,
 		ctx:    ctx,
 		cancel: cancel,
+		conns:  make(map[net.Conn]struct{}),
 	}
 }
 
@@ -117,6 +119,15 @@ func (s *Server) acceptLoop() {
 			}
 		}
 
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
+		s.conns[conn] = struct{}{}
+		s.mu.Unlock()
+
 		s.wg.Add(1)
 		go s.handleConnection(conn)
 	}
@@ -124,6 +135,9 @@ func (s *Server) acceptLoop() {
 
 func (s *Server) handleConnection(conn net.Conn) {
 	defer func() {
+		s.mu.Lock()
+		delete(s.conns, conn)
+		s.mu.Unlock()
 		_ = conn.Close()
 		s.wg.Done()
 	}()
@@ -671,15 +685,14 @@ func (s *Server) formatXReadResponse(streamName string, records []storage.Record
 	return []byte(out.String())
 }
 
-// Close gracefully stops the Redis protocol server.
-func (s *Server) Close() error {
+// CloseWithTimeout stops accepting new connections and waits up to drainTimeout for active connections to finish.
+func (s *Server) CloseWithTimeout(drainTimeout time.Duration) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
-	s.cancel()
 
 	var err error
 	if s.listener != nil {
@@ -687,7 +700,31 @@ func (s *Server) Close() error {
 	}
 	s.mu.Unlock()
 
-	s.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Cleanly drained
+	case <-time.After(drainTimeout):
+		// Drain timeout reached, cancel context and force close remaining connections
+		s.cancel()
+		s.mu.Lock()
+		for c := range s.conns {
+			_ = c.Close()
+		}
+		s.mu.Unlock()
+		<-done
+	}
+
 	return err
+}
+
+// Close gracefully stops the Redis protocol server.
+func (s *Server) Close() error {
+	return s.CloseWithTimeout(500 * time.Millisecond)
 }
 

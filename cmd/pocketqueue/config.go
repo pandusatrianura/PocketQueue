@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"log/slog"
+	"time"
 )
 
 // Config holds runtime configuration options for PocketQueue.
@@ -17,6 +18,13 @@ type Config struct {
 	JSONLog     bool
 	WithDemo    bool
 	ExportPath  string
+
+	// Retention & pruning options
+	RetentionBytes int64
+	RetentionAge   time.Duration
+
+	// Connection draining options
+	DrainTimeout time.Duration
 
 	// Traffic recording & replay options
 	RecordPath      string
@@ -53,6 +61,10 @@ func parseFlags() *Config {
 	flag.BoolVar(&cfg.JSONLog, "json-log", false, "Format logs as structured JSON")
 	flag.BoolVar(&cfg.WithDemo, "demo", false, "Emit simulated live traffic for testing / demonstration")
 	flag.StringVar(&cfg.ExportPath, "export", "", "Dump topic events to JSON file upon shutdown")
+
+	flag.Int64Var(&cfg.RetentionBytes, "retention-bytes", 100*1024*1024, "WAL maximum retention bytes per partition before rolling FIFO prune (default: 104857600 / 100MB)")
+	flag.DurationVar(&cfg.RetentionAge, "retention-age", 0, "WAL retention age duration (e.g. 24h, default 0 for disabled)")
+	flag.DurationVar(&cfg.DrainTimeout, "drain-timeout", 500*time.Millisecond, "Grace period duration to drain in-flight connections on shutdown (default 500ms)")
 
 	flag.StringVar(&cfg.RecordPath, "record", "", "File path to record live traffic session (.pqrec)")
 	flag.StringVar(&cfg.ReplayPath, "replay", "", "File path of .pqrec session to replay")

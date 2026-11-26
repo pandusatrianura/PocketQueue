@@ -209,6 +209,9 @@ PocketQueue requires zero configuration by default, but provides fine-grained co
 | `--log-level` | `info` | Log verbosity (`debug`, `info`, `warn`, `error`) | Use `debug` when diagnosing client handshakes |
 | `--json-log` | `false` | Format logs as structured JSON | Recommended for CI/CD and container logs |
 | `--export` | `""` (Empty) | Dump topic events to JSON on shutdown | Save event stream fixtures or share test recordings |
+| `--retention-bytes` | `104857600` (100MB) | Max partition log size before rolling FIFO prune | Prevents hard disks from filling during long runs |
+| `--retention-age` | `0` (Disabled) | Duration age retention threshold (e.g. `24h`) | Auto-cleans messages older than duration |
+| `--drain-timeout` | `500ms` | Grace period to drain active client requests | Prevents connection reset errors on shutdown |
 | `--kafka-port` | `9092` | Kafka port (alias for `--port`) | Standard Kafka port (`0` to disable Kafka) |
 
 ---
@@ -230,7 +233,8 @@ PocketQueue requires zero configuration by default, but provides fine-grained co
 ./bin/pocketqueue --data-dir ./my-data
 ```
 - Creates append-only Write-Ahead Logs (`.wal`) inside `./my-data`.
-- Automatically restores all topics, messages, and offsets when restarted.
+- Automatically persists and restores consumer group offsets (`offsets.json`).
+- Automatic rolling FIFO pruning (`--retention-bytes`) cleans older messages when reaching capacity.
 
 #### Recipe 3: Headless CI / CD Pipeline
 *Best for: GitHub Actions, GitLab CI, or automated test runners.*
@@ -238,25 +242,32 @@ PocketQueue requires zero configuration by default, but provides fine-grained co
 ./bin/pocketqueue --headless --port 9092 --redis-port 0 &
 ```
 - Starts silently in the background with zero TUI rendering overhead.
-- Shuts down cleanly with `SIGTERM` / `SIGINT`.
+- Shuts down cleanly with `SIGTERM` / `SIGINT` (draining in-flight requests within `--drain-timeout`).
 
-#### Recipe 4: Docker Compose Drop-in Replacement
+#### Recipe 4: Docker Compose with Built-in Healthcheck
 If your project uses Docker Compose, replace your heavy 1.5 GB Kafka container with PocketQueue:
 
 ```yaml
 version: '3.8'
 
 services:
-  # Replace confluentinc/cp-kafka with lightweight PocketQueue:
   pocketqueue:
-    image: golang:1.24-alpine
-    working_dir: /app
-    volumes:
-      - ./:/app
-    command: ./bin/pocketqueue --headless --host 0.0.0.0 --port 9092 --redis-port 6379
+    image: ghcr.io/pandusatrianura/pocketqueue:latest
     ports:
       - "9092:9092"
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "/app/pocketqueue", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+```
+
+#### Recipe 5: Built-in Healthcheck Probe (`pocketqueue ping`)
+Verify broker health without netcat or custom scripts:
+```bash
+./bin/pocketqueue ping --broker 127.0.0.1:9092
+# Output: ✅ Broker 127.0.0.1:9092 is healthy (RTT: 1.2ms)
 ```
 
 ---

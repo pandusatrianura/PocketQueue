@@ -44,6 +44,7 @@ type Service struct {
 	mu           sync.RWMutex
 	topics       map[string]int32                      // topicName -> partitionCount
 	groupOffsets map[string]map[string]map[int32]int64 // groupID -> topic -> partition -> offset
+	offsetStore  OffsetStore                           // optional consumer group offset persistence
 	chaos        *ChaosEngine                          // optional chaos / fault injection engine
 	closed       bool
 }
@@ -85,6 +86,42 @@ func (s *Service) Chaos() *ChaosEngine {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.chaos
+}
+
+// SetOffsetStore configures the persistent offset store and restores any saved offsets.
+func (s *Service) SetOffsetStore(store OffsetStore) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.offsetStore = store
+	if store != nil {
+		loaded, err := store.Load()
+		if err != nil {
+			return err
+		}
+		if loaded != nil {
+			for grp, topics := range loaded {
+				if _, exists := s.groupOffsets[grp]; !exists {
+					s.groupOffsets[grp] = make(map[string]map[int32]int64)
+				}
+				for t, parts := range topics {
+					if _, exists := s.groupOffsets[grp][t]; !exists {
+						s.groupOffsets[grp][t] = make(map[int32]int64)
+					}
+					for p, off := range parts {
+						s.groupOffsets[grp][t][p] = off
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// OffsetStore returns the active offset store if configured.
+func (s *Service) OffsetStore() OffsetStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.offsetStore
 }
 
 // EventBus returns the active EventBus instance for real-time pub/sub notifications.

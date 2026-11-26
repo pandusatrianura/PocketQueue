@@ -193,12 +193,93 @@ func TestWALEngine_FileSizeLimit(t *testing.T) {
 		t.Fatalf("record 2 failed: %v", err)
 	}
 
-	// Append record 3 (should exceed 120 byte limit and be rejected)
-	_, err = wal.Append(ctx, "capped-topic", 0, []byte("key3-overflow"), []byte("val3-overflow-payload"), nil)
+	// Append record 3 (single oversized record exceeding the entire 120 byte limit should be rejected)
+	oversizedPayload := make([]byte, 150)
+	_, err = wal.Append(ctx, "capped-topic", 0, []byte("oversized-key"), oversizedPayload, nil)
 	if err == nil {
 		t.Fatalf("expected error exceeding file size limit, got nil")
 	}
 	if !errors.Is(err, storage.ErrWALFileSizeLimitExceeded) {
 		t.Errorf("expected ErrWALFileSizeLimitExceeded, got: %v", err)
+	}
+}
+
+func TestWAL_RetentionPruning(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "pocketqueue-wal-retention-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	ctx := context.Background()
+	// Set limit to 2 KB
+	wal1, err := storage.NewWALEngineWithLimit(tempDir, 2048)
+	if err != nil {
+		t.Fatalf("failed to create wal1: %v", err)
+	}
+
+	// Write 50 records of ~100 bytes each (total ~5000 bytes > 2048 limit)
+	payload := make([]byte, 80)
+	for i := range payload {
+		payload[i] = 'A'
+	}
+
+	for i := 0; i < 50; i++ {
+		_, err := wal1.Append(ctx, "stream", 0, []byte("k"), payload, nil)
+		if err != nil {
+			t.Fatalf("append %d failed unexpectedly: %v", i, err)
+		}
+	}
+
+	// Verify watermarks
+	wm1, err := wal1.GetWatermarks(ctx, "stream", 0)
+	if err != nil {
+		t.Fatalf("get watermarks failed: %v", err)
+	}
+
+	if wm1.Earliest == 0 {
+		t.Fatalf("expected earliest watermark to advance > 0 after retention pruning, got: %d", wm1.Earliest)
+	}
+	if wm1.Latest != 50 {
+		t.Fatalf("expected latest watermark to be 50, got: %d", wm1.Latest)
+	}
+
+	// Verify we can read remaining records
+	records, err := wal1.ReadFrom(ctx, "stream", 0, wm1.Earliest, 100)
+	if err != nil {
+		t.Fatalf("read from earliest failed: %v", err)
+	}
+	if len(records) != int(wm1.Latest-wm1.Earliest) {
+		t.Fatalf("expected %d records, got %d", wm1.Latest-wm1.Earliest, len(records))
+	}
+
+	// Close session 1
+	if err := wal1.Close(); err != nil {
+		t.Fatalf("wal1 close failed: %v", err)
+	}
+
+	// Verify session 2 recovers persisted state accurately
+	wal2, err := storage.NewWALEngineWithLimit(tempDir, 2048)
+	if err != nil {
+		t.Fatalf("failed to create wal2: %v", err)
+	}
+	defer wal2.Close()
+
+	wm2, err := wal2.GetWatermarks(ctx, "stream", 0)
+	if err != nil {
+		t.Fatalf("wal2 get watermarks failed: %v", err)
+	}
+	if wm2.Earliest != wm1.Earliest || wm2.Latest != wm1.Latest {
+		t.Fatalf("watermarks mismatch after recovery: got [%d, %d], expected [%d, %d]",
+			wm2.Earliest, wm2.Latest, wm1.Earliest, wm1.Latest)
+	}
+
+	// Verify append continues smoothly
+	rec51, err := wal2.Append(ctx, "stream", 0, []byte("k"), payload, nil)
+	if err != nil {
+		t.Fatalf("append after recovery failed: %v", err)
+	}
+	if rec51.Offset != 50 {
+		t.Fatalf("expected next offset 50, got %d", rec51.Offset)
 	}
 }

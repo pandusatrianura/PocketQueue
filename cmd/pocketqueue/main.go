@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,6 +23,14 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "ping" {
+		if err := runPingCommand(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Healthcheck Failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "test" {
 		if err := runTestCommand(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "❌ Assertion Failed: %v\n", err)
@@ -71,7 +80,7 @@ func main() {
 	var engine storage.Engine
 	var err error
 	if cfg.DataDir != "" {
-		engine, err = storage.NewWALEngine(cfg.DataDir)
+		engine, err = storage.NewWALEngineWithLimit(cfg.DataDir, cfg.RetentionBytes)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error initializing WAL storage in %s: %v\n", cfg.DataDir, err)
 			os.Exit(1)
@@ -83,6 +92,17 @@ func main() {
 	bus := broker.NewEventBus(1000)
 	brokerSvc := broker.NewService(engine, bus, 1)
 	defer brokerSvc.Close()
+
+	if cfg.DataDir != "" {
+		offsetStore, err := broker.NewFileOffsetStore(cfg.DataDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error initializing offset store in %s: %v\n", cfg.DataDir, err)
+			os.Exit(1)
+		}
+		if err := brokerSvc.SetOffsetStore(offsetStore); err != nil {
+			fmt.Fprintf(os.Stderr, "Error restoring offsets from %s: %v\n", cfg.DataDir, err)
+		}
+	}
 
 	// If chaos flags are set, configure chaos engine
 	if cfg.ChaosLatency > 0 || cfg.ChaosDropRate > 0 || cfg.ChaosDuplicateRate > 0 {
@@ -223,7 +243,24 @@ func main() {
 			endpoints, storageMode, demoNote, chaosNote, bootDuration)
 		<-sigChan
 		cancel()
-		fmt.Println("\nShutting down PocketQueue gracefully...")
+		fmt.Printf("\nShutting down PocketQueue gracefully (draining up to %v)...\n", cfg.DrainTimeout)
+
+		var drainWg sync.WaitGroup
+		if kafkaServer != nil {
+			drainWg.Add(1)
+			go func() {
+				defer drainWg.Done()
+				_ = kafkaServer.CloseWithTimeout(cfg.DrainTimeout)
+			}()
+		}
+		if redisServer != nil {
+			drainWg.Add(1)
+			go func() {
+				defer drainWg.Done()
+				_ = redisServer.CloseWithTimeout(cfg.DrainTimeout)
+			}()
+		}
+		drainWg.Wait()
 	}
 
 	if cfg.ExportPath != "" {

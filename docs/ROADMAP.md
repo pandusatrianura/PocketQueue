@@ -94,9 +94,39 @@ This roadmap outlines the evolution of PocketQueue while adhering strictly to th
   - Evaluates `--broker`, `--expect-topic`, `--expect-key`, `--expect-payload`, and `--timeout`.
   - Exits with `code 0` on match and `code 1` on timeout for instant GitHub Actions integration testing.
 
+### Milestone 6.1: Data Resilience & Container DX ✅
+*Objective: Elevate data durability, automated log retention, and container production readiness.*
+- **Consumer Group Offset Persistence (`offsets.json`)**:
+  - Committed consumer group offsets are automatically persisted to disk when `--data-dir` is specified.
+  - 50ms debounced disk sync (atomic file replace `offsets.json.tmp` -> `offsets.json`) ensures high consumer throughput (>10k ops/sec) with zero disk thrashing.
+  - Synchronous flush upon shutdown guarantees zero committed offset loss across restarts.
+  - Deep-copy thread-safe snapshotting preventing concurrent read/write data races.
+- **WAL Retention & Rolling FIFO Pruning**:
+  - Automatic FIFO log pruning when partition files exceed `--retention-bytes` (default: 100 MB per partition).
+  - Automatically compacts surviving frames and advances `startOffset` (`Earliest` watermark) without write rejections (`ErrWALFileSizeLimitExceeded`).
+  - Supports `--retention-age` duration flag.
+- **Built-in Healthcheck Probe Command (`pocketqueue ping`)**:
+  - `pocketqueue ping --broker 127.0.0.1:9092 [--timeout 2s]`: Sends native Kafka `ApiVersions` probe, measures latency, and exits code 0 on healthy response or code 1 on timeout/failure.
+  - Enables clean, zero-dependency Docker/Kubernetes healthcheck configurations (`test: ["CMD", "/app/pocketqueue", "ping"]`).
+- **Graceful Connection Draining**:
+  - Added `--drain-timeout` (default 500ms).
+  - On `SIGINT`/`SIGTERM`: immediately stops accepting new connections, drains in-flight requests cleanly, flushes storage and offset state, and exits gracefully.
+
 ---
 
 ## 🚀 Upcoming Milestones
+
+### Milestone 7: HTTP REST Ingress, SSE Bridge & Packaging Automation
+*Objective: Universal browser and webhook connectivity without requiring Kafka/Redis client SDKs.*
+- **HTTP REST Ingress**:
+  - Minimalist HTTP server (`--http-port <port>`, disabled by default `0`).
+  - `POST /api/v1/topics/:topic` endpoint accepting JSON/binary payloads with automatic partition routing.
+- **Server-Sent Events (SSE) Stream Bridge**:
+  - `GET /api/v1/topics/:topic/sse` endpoint allowing frontend apps (React, Vue, Svelte) to consume live event streams via standard browser `EventSource`.
+- **Webhook Dead-Letter Queue (DLQ) Notification**:
+  - Automatically dispatch HTTP POST webhooks to external URLs when messages are routed to DLQ topics (`*.dlq`).
+- **Automated SHA-256 Release Distribution**:
+  - Enhance `.github/workflows/release.yml` to compute release archive checksums and automatically update the Homebrew formula and Scoop manifest on every git tag.
 
 ### Milestone 7: Webhook / HTTP Ingress Bridge (Optional Headless Adapter)
 - Expose lightweight REST / SSE endpoint on port `:8080` for event streaming into web browsers without custom clients.

@@ -201,10 +201,28 @@ func (wp *walPartition) append(key, value []byte, headers []Header) (*Record, er
 		return nil, err
 	}
 	filePos := stat.Size()
+	recordLen := int64(len(buf))
 
-	if wp.maxFileSize > 0 && filePos+int64(len(buf)) > wp.maxFileSize {
-		return nil, fmt.Errorf("%w: partition %s_%d reached maximum size of %d bytes",
-			ErrWALFileSizeLimitExceeded, wp.topic, wp.partition, wp.maxFileSize)
+	if wp.maxFileSize > 0 && recordLen > wp.maxFileSize {
+		return nil, fmt.Errorf("%w: record size %d exceeds partition maximum size of %d bytes",
+			ErrWALFileSizeLimitExceeded, recordLen, wp.maxFileSize)
+	}
+
+	// If appending exceeds maxFileSize, prune oldest records to free room
+	if wp.maxFileSize > 0 && filePos+recordLen > wp.maxFileSize {
+		needed := (filePos + recordLen) - wp.maxFileSize
+		minPruneChunk := wp.maxFileSize / 4
+		if minPruneChunk < needed {
+			minPruneChunk = needed
+		}
+		if err := wp.pruneOldestLocked(minPruneChunk); err != nil {
+			return nil, fmt.Errorf("retention prune failed: %w", err)
+		}
+		stat, err = wp.file.Stat()
+		if err != nil {
+			return nil, err
+		}
+		filePos = stat.Size()
 	}
 
 	if _, err := wp.file.WriteAt(buf, filePos); err != nil {
@@ -333,6 +351,107 @@ func (wp *walPartition) close() error {
 	if wp.file != nil {
 		return wp.file.Close()
 	}
+	return nil
+}
+
+func (wp *walPartition) pruneOldest(bytesToFree int64) error {
+	wp.mu.Lock()
+	defer wp.mu.Unlock()
+	return wp.pruneOldestLocked(bytesToFree)
+}
+
+func (wp *walPartition) pruneOldestLocked(bytesToFree int64) error {
+	if len(wp.index) == 0 {
+		return nil
+	}
+
+	var prunedCount int
+	var bytesFreed int64
+	for prunedCount < len(wp.index) && bytesFreed < bytesToFree {
+		bytesFreed += int64(wp.index[prunedCount].length)
+		prunedCount++
+	}
+
+	if prunedCount == 0 {
+		return nil
+	}
+
+	tmpPath := wp.filePath + ".tmp"
+	tmpFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("create prune tmp file: %w", err)
+	}
+
+	var shiftBytes int64
+	if prunedCount < len(wp.index) {
+		shiftBytes = wp.index[prunedCount].position
+		stat, err := wp.file.Stat()
+		if err != nil {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpPath)
+			return err
+		}
+		remainingBytes := stat.Size() - shiftBytes
+		if remainingBytes > 0 {
+			if _, err := wp.file.Seek(shiftBytes, io.SeekStart); err != nil {
+				_ = tmpFile.Close()
+				_ = os.Remove(tmpPath)
+				return fmt.Errorf("seek to remaining bytes: %w", err)
+			}
+			if _, err := io.CopyN(tmpFile, wp.file, remainingBytes); err != nil {
+				_ = tmpFile.Close()
+				_ = os.Remove(tmpPath)
+				return fmt.Errorf("copy remaining wal bytes: %w", err)
+			}
+		}
+	} else {
+		stat, _ := wp.file.Stat()
+		if stat != nil {
+			shiftBytes = stat.Size()
+		}
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("sync prune tmp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close prune tmp file: %w", err)
+	}
+
+	if err := wp.file.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close original wal file: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, wp.filePath); err != nil {
+		return fmt.Errorf("atomic rename compacted wal: %w", err)
+	}
+
+	reopened, err := os.OpenFile(wp.filePath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("reopen compacted wal: %w", err)
+	}
+	wp.file = reopened
+
+	if prunedCount < len(wp.index) {
+		newIndex := make([]walIndexEntry, len(wp.index)-prunedCount)
+		for i, entry := range wp.index[prunedCount:] {
+			newIndex[i] = walIndexEntry{
+				offset:   entry.offset,
+				position: entry.position - shiftBytes,
+				length:   entry.length,
+			}
+		}
+		wp.index = newIndex
+		wp.startOffset = wp.index[0].offset
+	} else {
+		wp.index = make([]walIndexEntry, 0)
+		wp.startOffset = wp.nextOffset
+	}
+
 	return nil
 }
 
@@ -472,6 +591,24 @@ func (w *WALEngine) ListTopics(ctx context.Context) (map[string]int32, error) {
 		result[topic] = int32(len(parts))
 	}
 	return result, nil
+}
+
+// PruneOldest prunes oldest records from a specific partition to free at least bytesToFree bytes.
+func (w *WALEngine) PruneOldest(topic string, partition int32, bytesToFree int64) error {
+	w.mu.RLock()
+	parts, exists := w.partitions[topic]
+	if !exists {
+		w.mu.RUnlock()
+		return ErrTopicNotFound
+	}
+	wp, exists := parts[partition]
+	w.mu.RUnlock()
+
+	if !exists {
+		return ErrPartitionNotFound
+	}
+
+	return wp.pruneOldest(bytesToFree)
 }
 
 // Sync flushes all open WAL partition files to physical disk.
