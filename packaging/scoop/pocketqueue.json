@@ -6,12 +6,12 @@
   "architecture": {
     "64bit": {
       "url": "https://github.com/pandusatrianura/pocketqueue/releases/download/v0.7.0/pocketqueue-windows-amd64.zip",
-      "hash": "c98a2334275c8c570d5e9ecd66dec1ea054e25a9669f6416edc25a8cb9538b14",
+      "hash": "4c67a5cd9b8e6062e55362fff396f67c85e5b2ed25eb41ed9f8b3d34d59fa4dd",
       "bin": "pocketqueue.exe"
     },
     "arm64": {
       "url": "https://github.com/pandusatrianura/pocketqueue/releases/download/v0.7.0/pocketqueue-windows-arm64.zip",
-      "hash": "08f3f5db4ce184221e565fe17987d7617bf8e8967f0484f9ebde7c7ac6954d2b",
+      "hash": "096fdec6230b45b0d1e84509115ca88b4567cb111f41334148e4cc9170090091",
       "bin": "pocketqueue.exe"
     }
   },

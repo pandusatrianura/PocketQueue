@@ -7,20 +7,20 @@ class Pocketqueue < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/pandusatrianura/pocketqueue/releases/download/v#{version}/pocketqueue-darwin-arm64.tar.gz"
-      sha256 "6bb1c9a5939870ed38908ece8911f14a7eb7e3deffa9e6a539ccd13ea70d6edf"
+      sha256 "67955aa2e48242864712929fd41c416b2095b651360d36485b190ea614d8965f"
     else
       url "https://github.com/pandusatrianura/pocketqueue/releases/download/v#{version}/pocketqueue-darwin-amd64.tar.gz"
-      sha256 "d5346bb10aaf081907bff40b677301074e0215843578d8fa2a09fde9e543bbf8"
+      sha256 "9e28eeca8ef00a89f4ce7684a0b51f46995986e85e2f1f4be48e19c8b5d2a1c5"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
       url "https://github.com/pandusatrianura/pocketqueue/releases/download/v#{version}/pocketqueue-linux-arm64.tar.gz"
-      sha256 "323ef22096d9d0aa662e56307a657ecca3ce07393131b82270adbdb5985c3186"
+      sha256 "d6fcdf1cab5b122109945549dd0523b2cc5af56d1d68b203876102d8c1268df3"
     else
       url "https://github.com/pandusatrianura/pocketqueue/releases/download/v#{version}/pocketqueue-linux-amd64.tar.gz"
-      sha256 "7853090a486bb4b5c3a77e65464291d76d5cd9eaab41d655d3cadd388716d2a5"
+      sha256 "a7c62c0c0cab2e95ee83131997c41a847c56e3bd25c162b791ded74fb6de7c02"
     end
   end
 
