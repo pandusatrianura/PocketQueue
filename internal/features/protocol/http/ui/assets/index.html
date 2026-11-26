@@ -164,10 +164,14 @@
   <div id="modal-inspect" class="modal">
     <div class="modal-dialog">
       <div class="modal-header">
-        <h4>Inspect Message</h4>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <h4>Inspect Message</h4>
+          <span id="inspect-badge" class="badge badge-muted" style="display: none;"></span>
+        </div>
         <button class="secondary sm modal-close">&times;</button>
       </div>
       <div id="modal-inspect-body">
+        <div id="inspect-meta" style="margin-bottom: 0.75rem; font-size: 0.85rem; color: var(--pico-muted);"></div>
         <pre><code id="inspect-code"></code></pre>
       </div>
     </div>

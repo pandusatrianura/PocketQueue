@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/mattn/go-isatty"
 	"github.com/pandusatrianura/pocketqueue/internal/features/broker"
+	"github.com/pandusatrianura/pocketqueue/internal/features/decoder"
 	"github.com/pandusatrianura/pocketqueue/internal/features/demo"
 	protocolhttp "github.com/pandusatrianura/pocketqueue/internal/features/protocol/http"
 	"github.com/pandusatrianura/pocketqueue/internal/features/protocol/kafka"
@@ -25,7 +27,7 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Println("PocketQueue v0.7.0")
+		fmt.Println("PocketQueue v0.8.0")
 		os.Exit(0)
 	}
 
@@ -167,6 +169,18 @@ func main() {
 		go gen.Start(ctx, 800*time.Millisecond)
 	}
 
+	// 1. Initialize Universal Payload Decoder
+	reg := decoder.NewSchemaRegistry()
+	if cfg.ProtoDescPath != "" {
+		if err := reg.LoadDescriptorSet(cfg.ProtoDescPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to load protobuf descriptor set from %s: %v\n", cfg.ProtoDescPath, err)
+		} else {
+			descs := reg.Descriptors()
+			slog.Info("loaded protobuf descriptor set", "path", cfg.ProtoDescPath, "messages_count", len(descs))
+		}
+	}
+	payloadDecoder := decoder.NewUniversalDecoder(reg)
+
 	// 2. Start Kafka Protocol Server (port 9092)
 	var kafkaServer *kafka.Server
 	if cfg.Port > 0 {
@@ -205,6 +219,7 @@ func main() {
 	if cfg.HTTPPort > 0 {
 		httpAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.HTTPPort)
 		httpServer = protocolhttp.NewServer(httpAddr, brokerSvc, bus, nil)
+		httpServer.SetDecoder(payloadDecoder)
 		if err := httpServer.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error starting HTTP protocol bridge: %v\n", err)
 			os.Exit(1)
@@ -229,6 +244,7 @@ func main() {
 	if isTerminal {
 		// Run Charm Bubbletea TUI
 		appModel := tui.NewAppModel(brokerSvc, bus, cfg.MaxMessages)
+		appModel.SetDecoder(payloadDecoder)
 		p := tea.NewProgram(appModel, tea.WithAltScreen())
 
 		go func() {
@@ -255,6 +271,9 @@ func main() {
 		}
 		if dlqDispatcher != nil {
 			endpoints += fmt.Sprintf("DLQ-Webhook:%s ", cfg.DLQWebhookURL)
+		}
+		if cfg.ProtoDescPath != "" {
+			endpoints += fmt.Sprintf("Schemas:%s ", cfg.ProtoDescPath)
 		}
 		storageMode := "In-Memory"
 		if cfg.DataDir != "" {

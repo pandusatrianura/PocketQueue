@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/pandusatrianura/pocketqueue/internal/features/broker"
+	"github.com/pandusatrianura/pocketqueue/internal/features/decoder"
 )
 
 // Server encapsulates the HTTP REST and SSE streaming server.
@@ -36,6 +37,11 @@ func NewServer(addr string, svc *broker.Service, bus *broker.EventBus, logger *s
 		handler: handler,
 		logger:  logger,
 	}
+}
+
+// SetDecoder configures the payload decoder on the underlying handler.
+func (s *Server) SetDecoder(d decoder.PayloadDecoder) {
+	s.handler.SetDecoder(d)
 }
 
 // Start binds to the configured network address and begins listening.

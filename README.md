@@ -28,6 +28,7 @@ Running Kafka, Zookeeper, or RabbitMQ on local dev machines consumes **1.5–3 G
 - **Microsecond Cold Start (< 3 ms)**: Ready to accept connections almost instantaneously.
 - **Drop-in Wire Compatibility**: Works with standard Kafka SDKs (port `9092`) and Redis Streams clients (port `6379`) without modifying your business code.
 - **Interactive Terminal UI (TUI) & Embedded Web Dashboard**: Real-time event streaming, syntax-highlighted JSON inspector, and inline **Dead-Letter Queue (DLQ) Replay Studio** powered by Charm `bubbletea`, plus a zero-dependency embedded Web UI at `http://localhost:8080`.
+- **Dynamic Protobuf & Schema Decoder**: Automatic detection of Confluent Wire Format (magic byte `0x00` + Schema ID) and raw Protobuf payloads via `--proto-desc`, with structured JSON reflection and aligned 16-byte Hex Dump fallback.
 - **Flexible Durability**: Runs in pure memory by default (zero disk cruft) or with persistent append-only Write-Ahead Logs via `--data-dir`.
 
 ---
@@ -187,6 +188,24 @@ Launch PocketQueue with `--http-port 8080` to access the built-in Web Studio dir
 - 🚨 **Dead-Letter Queue (DLQ) Studio & 1-Click Replay**: Dedicated triage dashboard for `.dlq` topics. Inspect poison pill failure reasons, edit/repair the payload in a modal, and re-inject the corrected event directly into the target topic via `POST /api/v1/dlq/replay`.
 - 🔒 **Air-Gapped & Zero-Dependency**: Embedded directly into the single executable via Go `embed.FS` (total asset bundle $< 31\text{ KB}$ uncompressed, PicoCSS v2 subset, vanilla JS, SVG icons). Zero external CDN or Node.js runtime required; works 100% offline.
 
+### Workflow 8: Dynamic Protobuf & Confluent Wire Format Payload Decoder
+In modern event-driven architectures, messages are frequently serialized using Protocol Buffers or Confluent Schema Registry wire format (magic byte `0x00` + 4-byte Schema ID + varint indexes) rather than plain text JSON.
+
+PocketQueue features an auto-detecting dynamic decoding cascade:
+1. **Confluent Wire Format Auto-Detection**: Detects magic byte `0x00` and extracts the 4-byte Schema ID. When a descriptor set is provided via `--proto-desc`, PocketQueue automatically unmarshals and renders the Protobuf message into formatted JSON.
+2. **Raw Protobuf Auto-Detection**: Unmarshals raw binary Protobuf messages by dynamically reflecting schemas across all registered definitions in the descriptor set.
+3. **Aligned 16-Byte Hex Dump Fallback**: Any binary payload without a matching descriptor or unrecognized bytes automatically renders in standard 16-byte aligned hex format with ASCII preview (like `hexdump -C`).
+4. **Visual Badges**: Displays `[Protobuf: <MessageType> (#<ID>)]`, `[Confluent Wire Format (#<ID>)]`, or `[Binary - <N> bytes]` pills directly in the Charm TUI Inspector (`Enter`) and Web Dashboard Modal.
+5. **Enriched SSE Streams**: Delivers a `decoded` object (`kind`, `schema_id`, `message_name`, `formatted`, `is_binary`) in the real-time event stream (`/api/v1/topics/_all/sse`).
+
+```bash
+# 1. Compile your .proto files into a descriptor set:
+protoc --descriptor_set_out=schemas.desc --include_imports order.proto user.proto
+
+# 2. Launch PocketQueue with dynamic Protobuf decoding enabled:
+./bin/pocketqueue --proto-desc schemas.desc --http-port 8080
+```
+
 ---
 
 ## 🔌 Verified Client SDK Compatibility
@@ -251,6 +270,7 @@ PocketQueue requires zero configuration by default, but provides fine-grained co
 | `--port` | `9092` | Kafka wire protocol port | Standard Kafka port (`0` to disable Kafka) |
 | `--redis-port` | `6379` | Redis Streams RESP port | Standard Redis port (`0` to disable Redis) |
 | `--http-port` | `0` (Disabled) | HTTP REST ingress, SSE bridge, and embedded Web Dashboard port | Set to `8080` to open Web UI at `http://localhost:8080` |
+| `--proto-desc` | `""` (Disabled) | Path to compiled Protobuf `FileDescriptorSet` (`.desc`) | Supply compiled `.desc` file to dynamically decode Protobuf payloads |
 | `--dlq-webhook-url` | `""` (Disabled) | Target URL for Dead-Letter Queue event notifications | HTTP POST destination with auto-retries for `.dlq` records |
 | `--data-dir` | `""` (Empty) | Directory for WAL disk persistence | Set to `./data` to retain messages across reboots |
 | `--headless` | `false` | Run as background daemon | Use in CI/CD, scripts, and Docker containers |

@@ -1,6 +1,7 @@
 package tui_test
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,8 +10,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/pandusatrianura/pocketqueue/internal/features/broker"
+	"github.com/pandusatrianura/pocketqueue/internal/features/decoder"
 	"github.com/pandusatrianura/pocketqueue/internal/features/storage"
 	"github.com/pandusatrianura/pocketqueue/internal/features/tui"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 func TestAppModel_Lifecycle(t *testing.T) {
@@ -361,5 +366,71 @@ func TestTUI_ChaosModal(t *testing.T) {
 		t.Fatalf("expected chaos modal to be closed on Esc")
 	}
 }
+
+func TestTUI_InspectProtobufPayload(t *testing.T) {
+	engine := storage.NewMemoryEngine(100)
+	bus := broker.NewEventBus(50)
+	svc := broker.NewService(engine, bus, 1)
+
+	model := tui.NewAppModel(svc, bus, 100)
+
+	reg := decoder.NewSchemaRegistry()
+	if err := reg.LoadDescriptorSet("../../../test/fixtures/schemas.desc"); err != nil {
+		t.Fatalf("failed to load descriptor set: %v", err)
+	}
+	model.SetDecoder(decoder.NewUniversalDecoder(reg))
+
+	m, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+
+	// Create dynamic protobuf payload
+	desc := reg.FindDescriptor("OrderEvent")
+	msg := dynamicpb.NewMessage(desc)
+	msg.Set(desc.Fields().ByName("order_id"), protoreflect.ValueOfString("ORD-TUI-999"))
+	msg.Set(desc.Fields().ByName("customer_id"), protoreflect.ValueOfString("CUST-TUI-1"))
+	msg.Set(desc.Fields().ByName("total_amount"), protoreflect.ValueOfFloat64(129.99))
+	pbBytes, _ := proto.Marshal(msg)
+
+	confluentPayload := make([]byte, 5)
+	confluentPayload[0] = 0x00
+	binary.BigEndian.PutUint32(confluentPayload[1:5], 12)
+	confluentPayload = append(confluentPayload, 0x00) // varint 0
+	confluentPayload = append(confluentPayload, pbBytes...)
+
+	bus.Publish(storage.Record{
+		Topic:     "orders.proto",
+		Partition: 0,
+		Offset:    0,
+		Key:       []byte("ord-999"),
+		Value:     confluentPayload,
+		Timestamp: time.Now(),
+	})
+
+	cmd := m.Init()
+	if cmd != nil {
+		m, _ = m.Update(cmd())
+	}
+
+	// Press Enter to open Inspector Modal on selected message
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	inspectView := m.View()
+
+	if !strings.Contains(inspectView, "[Protobuf: OrderEvent (#12)]") {
+		t.Errorf("expected inspect modal to contain badge [Protobuf: OrderEvent (#12)], got: %s", inspectView)
+	}
+	if !strings.Contains(inspectView, "ORD-TUI-999") {
+		t.Errorf("expected inspect modal to contain ORD-TUI-999, got: %s", inspectView)
+	}
+	if !strings.Contains(inspectView, "129.99") {
+		t.Errorf("expected inspect modal to contain 129.99, got: %s", inspectView)
+	}
+
+	// Press Esc to close modal
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	closedView := m.View()
+	if strings.Contains(closedView, "PAYLOAD [Protobuf:") {
+		t.Errorf("expected inspect modal to be closed on Esc")
+	}
+}
+
 
 

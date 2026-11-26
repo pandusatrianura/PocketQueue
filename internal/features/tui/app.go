@@ -16,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/pandusatrianura/pocketqueue/internal/features/broker"
+	"github.com/pandusatrianura/pocketqueue/internal/features/decoder"
 	"github.com/pandusatrianura/pocketqueue/internal/features/storage"
 )
 
@@ -74,6 +75,14 @@ type AppModel struct {
 	searchInput textinput.Model
 	statusMsg   string
 	lastRefresh time.Time
+	decoder     decoder.PayloadDecoder
+}
+
+// SetDecoder configures the payload decoder used for inspecting binary and protobuf payloads.
+func (m *AppModel) SetDecoder(d decoder.PayloadDecoder) {
+	if d != nil {
+		m.decoder = d
+	}
 }
 
 // NewAppModel creates a new Bubbletea model connected to the broker.
@@ -157,6 +166,7 @@ func NewAppModel(b *broker.Service, eb *broker.EventBus, maxMessages int) *AppMo
 		replayText:   ta,
 		searchInput:  ti,
 		statusMsg:    "PocketQueue Live • Port 9092",
+		decoder:      decoder.NewUniversalDecoder(nil),
 	}
 }
 
@@ -774,14 +784,46 @@ func (m *AppModel) renderInspectModal() string {
 	}
 
 	var payloadDisplay string
-	if isBinaryData(m.selectedMsg.Value) {
-		payloadDisplay = fmt.Sprintf("[Binary Data - %d bytes]\n\n%s", len(m.selectedMsg.Value), hex.Dump(m.selectedMsg.Value))
+	var badgeStr string
+
+	if m.decoder != nil {
+		dec := m.decoder.Decode(m.selectedMsg.Value)
+		switch dec.Kind {
+		case decoder.KindConfluent:
+			if dec.MessageName != "" {
+				badgeStr = fmt.Sprintf(" [Protobuf: %s (#%d)]", dec.MessageName, dec.SchemaID)
+			} else {
+				badgeStr = fmt.Sprintf(" [Confluent Wire Format (#%d)]", dec.SchemaID)
+			}
+			payloadDisplay = dec.Formatted
+		case decoder.KindProtobuf:
+			badgeStr = fmt.Sprintf(" [Protobuf: %s]", dec.MessageName)
+			payloadDisplay = dec.Formatted
+		case decoder.KindJSON:
+			badgeStr = " [JSON]"
+			payloadDisplay = dec.Formatted
+		case decoder.KindText:
+			badgeStr = " [Text]"
+			payloadDisplay = dec.Formatted
+		case decoder.KindHexDump:
+			badgeStr = fmt.Sprintf(" [Binary - %d bytes]", dec.RawBytes)
+			payloadDisplay = dec.Formatted
+		default:
+			payloadDisplay = dec.Formatted
+		}
 	} else {
-		var jsonPretty bytes.Buffer
-		if err := json.Indent(&jsonPretty, m.selectedMsg.Value, "", "  "); err == nil {
-			payloadDisplay = jsonPretty.String()
+		if isBinaryData(m.selectedMsg.Value) {
+			badgeStr = fmt.Sprintf(" [Binary - %d bytes]", len(m.selectedMsg.Value))
+			payloadDisplay = hex.Dump(m.selectedMsg.Value)
 		} else {
-			payloadDisplay = string(m.selectedMsg.Value)
+			var jsonPretty bytes.Buffer
+			if err := json.Indent(&jsonPretty, m.selectedMsg.Value, "", "  "); err == nil {
+				badgeStr = " [JSON]"
+				payloadDisplay = jsonPretty.String()
+			} else {
+				badgeStr = " [Text]"
+				payloadDisplay = string(m.selectedMsg.Value)
+			}
 		}
 	}
 
@@ -795,13 +837,14 @@ func (m *AppModel) renderInspectModal() string {
 	}
 
 	content := fmt.Sprintf(
-		"TOPIC:     %s\nPARTITION: %d\nOFFSET:    %d\nTIME:      %s\nKEY:       %s\nHEADERS:   %s\n\nPAYLOAD:\n%s",
+		"TOPIC:     %s\nPARTITION: %d\nOFFSET:    %d\nTIME:      %s\nKEY:       %s\nHEADERS:   %s\n\nPAYLOAD%s:\n%s",
 		m.selectedMsg.Topic,
 		m.selectedMsg.Partition,
 		m.selectedMsg.Offset,
 		m.selectedMsg.Timestamp.Format(time.RFC3339),
 		string(m.selectedMsg.Key),
 		headersStr,
+		badgeStr,
 		payloadDisplay,
 	)
 

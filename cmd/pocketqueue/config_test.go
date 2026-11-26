@@ -35,6 +35,11 @@ func TestConfig_ChaosFields(t *testing.T) {
 		DrainTimeout:       500 * 1000 * 1000,
 		HTTPPort:           8080,
 		DLQWebhookURL:      "http://127.0.0.1:8080/dlq",
+		ProtoDescPath:      "./test/fixtures/schemas.desc",
+	}
+
+	if cfg.ProtoDescPath != "./test/fixtures/schemas.desc" {
+		t.Errorf("unexpected ProtoDescPath: %s", cfg.ProtoDescPath)
 	}
 
 	if cfg.ChaosLatency != 100 || cfg.ChaosLatencyRate != 0.5 || cfg.ChaosDropRate != 0.1 || cfg.ChaosDuplicateRate != 0.05 {

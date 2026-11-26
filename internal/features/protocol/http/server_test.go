@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,8 +14,12 @@ import (
 	"time"
 
 	"github.com/pandusatrianura/pocketqueue/internal/features/broker"
+	"github.com/pandusatrianura/pocketqueue/internal/features/decoder"
 	protocolhttp "github.com/pandusatrianura/pocketqueue/internal/features/protocol/http"
 	"github.com/pandusatrianura/pocketqueue/internal/features/storage"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 func setupTestServer(t *testing.T) (*broker.Service, *protocolhttp.Server) {
@@ -642,5 +647,92 @@ func TestHTTP_SSEStream_Wildcard(t *testing.T) {
 
 	if !foundA || !foundB {
 		t.Fatalf("expected both topic-a and topic-b in wildcard SSE stream, got foundA=%v, foundB=%v", foundA, foundB)
+	}
+}
+
+func TestHTTP_SSEStream_DecodedPayload(t *testing.T) {
+	svc, server := setupTestServer(t)
+	defer svc.Close()
+	defer server.Close()
+
+	reg := decoder.NewSchemaRegistry()
+	if err := reg.LoadDescriptorSet("../../../../test/fixtures/schemas.desc"); err != nil {
+		t.Fatalf("failed to load descriptor set: %v", err)
+	}
+	server.SetDecoder(decoder.NewUniversalDecoder(reg))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL()+"/api/v1/topics/_all/sse", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("connect SSE stream: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Prepare Confluent Protobuf payload
+	desc := reg.FindDescriptor("OrderEvent")
+	msg := dynamicpb.NewMessage(desc)
+	msg.Set(desc.Fields().ByName("order_id"), protoreflect.ValueOfString("ORD-DECODED-42"))
+	msg.Set(desc.Fields().ByName("customer_id"), protoreflect.ValueOfString("CUST-42"))
+	msg.Set(desc.Fields().ByName("total_amount"), protoreflect.ValueOfFloat64(750.50))
+	pbBytes, _ := proto.Marshal(msg)
+
+	confluentPayload := make([]byte, 5)
+	confluentPayload[0] = 0x00
+	binary.BigEndian.PutUint32(confluentPayload[1:5], 99)
+	confluentPayload = append(confluentPayload, 0x00) // varint 0
+	confluentPayload = append(confluentPayload, pbBytes...)
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_, _ = svc.Produce(context.Background(), "orders.proto", 0, []byte("ord-key"), confluentPayload, nil)
+	}()
+
+	scanner := bufio.NewScanner(resp.Body)
+	var foundDecoded bool
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			dataJSON := strings.TrimPrefix(line, "data: ")
+			var obj struct {
+				Topic   string `json:"topic"`
+				Decoded struct {
+					Kind        string  `json:"kind"`
+					SchemaID    uint32  `json:"schema_id"`
+					MessageName string  `json:"message_name"`
+					Formatted   string  `json:"formatted"`
+					IsBinary    bool    `json:"is_binary"`
+				} `json:"decoded"`
+			}
+			if err := json.Unmarshal([]byte(dataJSON), &obj); err == nil && obj.Topic == "orders.proto" {
+				if obj.Decoded.Kind != "confluent_protobuf" {
+					t.Errorf("expected kind 'confluent_protobuf', got: %s", obj.Decoded.Kind)
+				}
+				if obj.Decoded.SchemaID != 99 {
+					t.Errorf("expected schema_id=99, got: %d", obj.Decoded.SchemaID)
+				}
+				if obj.Decoded.MessageName != "OrderEvent" {
+					t.Errorf("expected message_name='OrderEvent', got: %s", obj.Decoded.MessageName)
+				}
+				if !strings.Contains(obj.Decoded.Formatted, "ORD-DECODED-42") {
+					t.Errorf("expected formatted JSON to contain ORD-DECODED-42, got: %s", obj.Decoded.Formatted)
+				}
+				if !obj.Decoded.IsBinary {
+					t.Errorf("expected is_binary=true")
+				}
+				foundDecoded = true
+				break
+			}
+		}
+	}
+
+	if !foundDecoded {
+		t.Fatalf("did not receive decoded confluent protobuf message in SSE stream")
 	}
 }

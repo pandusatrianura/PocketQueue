@@ -20,6 +20,7 @@ type Config struct {
 	JSONLog     bool
 	WithDemo    bool
 	ExportPath  string
+	ProtoDescPath string
 
 	// Retention & pruning options
 	RetentionBytes int64
@@ -65,6 +66,7 @@ func parseFlags() *Config {
 	flag.BoolVar(&cfg.JSONLog, "json-log", false, "Format logs as structured JSON")
 	flag.BoolVar(&cfg.WithDemo, "demo", false, "Emit simulated live traffic for testing / demonstration")
 	flag.StringVar(&cfg.ExportPath, "export", "", "Dump topic events to JSON file upon shutdown")
+	flag.StringVar(&cfg.ProtoDescPath, "proto-desc", "", "File path to compiled protobuf FileDescriptorSet (.desc)")
 
 	flag.Int64Var(&cfg.RetentionBytes, "retention-bytes", 100*1024*1024, "WAL maximum retention bytes per partition before rolling FIFO prune (default: 104857600 / 100MB)")
 	flag.DurationVar(&cfg.RetentionAge, "retention-age", 0, "WAL retention age duration (e.g. 24h, default 0 for disabled)")

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pandusatrianura/pocketqueue/internal/features/broker"
+	"github.com/pandusatrianura/pocketqueue/internal/features/decoder"
 	"github.com/pandusatrianura/pocketqueue/internal/features/storage"
 )
 
@@ -36,6 +37,7 @@ type Handler struct {
 	eventBus  *broker.EventBus
 	logger    *slog.Logger
 	startTime time.Time
+	decoder   decoder.PayloadDecoder
 }
 
 // NewHandler instantiates an HTTP Handler.
@@ -48,7 +50,20 @@ func NewHandler(svc *broker.Service, bus *broker.EventBus, logger *slog.Logger) 
 		eventBus:  bus,
 		logger:    logger,
 		startTime: time.Now().UTC(),
+		decoder:   decoder.NewUniversalDecoder(nil),
 	}
+}
+
+// SetDecoder configures the payload decoder used for SSE stream and inspections.
+func (h *Handler) SetDecoder(d decoder.PayloadDecoder) {
+	if d != nil {
+		h.decoder = d
+	}
+}
+
+// Decoder returns the active payload decoder.
+func (h *Handler) Decoder() decoder.PayloadDecoder {
+	return h.decoder
 }
 
 // RegisterRoutes binds HTTP REST, SSE, and Web UI endpoints to the given mux.
@@ -218,14 +233,27 @@ func (h *Handler) handleSSEStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if topic == "*" || topic == "_all" || rec.Topic == topic {
-				payload, err := json.Marshal(map[string]any{
+				eventData := map[string]any{
 					"topic":     rec.Topic,
 					"partition": rec.Partition,
 					"offset":    rec.Offset,
 					"key":       string(rec.Key),
 					"value":     string(rec.Value),
 					"timestamp": rec.Timestamp.Format(time.RFC3339),
-				})
+				}
+				if h.decoder != nil {
+					dec := h.decoder.Decode(rec.Value)
+					eventData["decoded"] = map[string]any{
+						"kind":         dec.Kind,
+						"schema_id":    dec.SchemaID,
+						"message_name": dec.MessageName,
+						"formatted":    dec.Formatted,
+						"is_binary":    dec.IsBinary,
+						"raw_bytes":    dec.RawBytes,
+					}
+				}
+
+				payload, err := json.Marshal(eventData)
 				if err == nil {
 					fmt.Fprintf(w, "event: message\ndata: %s\n\n", payload)
 					flusher.Flush()

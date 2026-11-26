@@ -121,9 +121,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (state.searchQuery) {
       const q = state.searchQuery.toLowerCase();
       const valStr = typeof rec.value === 'string' ? rec.value.toLowerCase() : JSON.stringify(rec.value).toLowerCase();
+      const decodedStr = (rec.decoded && rec.decoded.formatted) ? rec.decoded.formatted.toLowerCase() : '';
       const keyStr = (rec.key || '').toLowerCase();
       const topicStr = (rec.topic || '').toLowerCase();
-      if (!valStr.includes(q) && !keyStr.includes(q) && !topicStr.includes(q)) {
+      if (!valStr.includes(q) && !decodedStr.includes(q) && !keyStr.includes(q) && !topicStr.includes(q)) {
         return false;
       }
     }
@@ -145,8 +146,26 @@ document.addEventListener('DOMContentLoaded', () => {
       const timeStr = rec.timestamp ? new Date(rec.timestamp).toLocaleTimeString() : '-';
       const topicBadge = isDLQ ? `<span class="badge badge-danger">🚨 ${escapeHTML(rec.topic)}</span>` : `<span class="badge badge-muted">${escapeHTML(rec.topic)}</span>`;
       const keyDisplay = rec.key ? escapeHTML(rec.key) : '<span style="color:var(--pico-muted)">(none)</span>';
-      const valStr = typeof rec.value === 'string' ? rec.value : JSON.stringify(rec.value);
-      const valPreview = escapeHTML(valStr.length > 80 ? valStr.substring(0, 80) + '…' : valStr);
+
+      let valSnippet = '';
+      let schemaPill = '';
+      if (rec.decoded) {
+        if (rec.decoded.kind === 'confluent_protobuf') {
+          schemaPill = `<span class="badge badge-warning" style="font-size:0.68rem; margin-right:4px;">PB #${rec.decoded.schema_id}</span>`;
+          valSnippet = rec.decoded.formatted.replace(/\s+/g, ' ');
+        } else if (rec.decoded.kind === 'protobuf') {
+          schemaPill = `<span class="badge badge-warning" style="font-size:0.68rem; margin-right:4px;">Protobuf</span>`;
+          valSnippet = rec.decoded.formatted.replace(/\s+/g, ' ');
+        } else if (rec.decoded.kind === 'hex_dump') {
+          schemaPill = `<span class="badge badge-danger" style="font-size:0.68rem; margin-right:4px;">Hex</span>`;
+          valSnippet = `[Binary: ${rec.decoded.raw_bytes || 0} bytes]`;
+        } else {
+          valSnippet = typeof rec.value === 'string' ? rec.value : JSON.stringify(rec.value);
+        }
+      } else {
+        valSnippet = typeof rec.value === 'string' ? rec.value : JSON.stringify(rec.value);
+      }
+      const valPreview = escapeHTML(valSnippet.length > 70 ? valSnippet.substring(0, 70) + '…' : valSnippet);
 
       return `
         <tr>
@@ -155,7 +174,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <td>${rec.partition}</td>
           <td><code>#${rec.offset}</code></td>
           <td><code>${keyDisplay}</code></td>
-          <td class="payload-cell" title="${escapeHTML(valStr)}">${valPreview}</td>
+          <td class="payload-cell">${schemaPill}${valPreview}</td>
           <td><button class="secondary sm btn-inspect" data-idx="${idx}">Inspect</button></td>
         </tr>
       `;
@@ -178,30 +197,64 @@ document.addEventListener('DOMContentLoaded', () => {
   function openInspectModal(rec) {
     const modal = document.getElementById('modal-inspect');
     const codeEl = document.getElementById('inspect-code');
+    const badgeEl = document.getElementById('inspect-badge');
+    const metaEl = document.getElementById('inspect-meta');
     if (!modal || !codeEl) return;
 
-    let formatted = rec.value;
-    try {
-      if (typeof rec.value === 'string') {
-        const parsed = JSON.parse(rec.value);
-        formatted = JSON.stringify(parsed, null, 2);
-      } else {
-        formatted = JSON.stringify(rec.value, null, 2);
+    let displayFormatted = '';
+    let badgeText = '';
+    let badgeClass = 'badge badge-muted';
+
+    if (rec.decoded) {
+      if (rec.decoded.kind === 'confluent_protobuf') {
+        badgeText = rec.decoded.message_name 
+          ? `Protobuf: ${rec.decoded.message_name} (#${rec.decoded.schema_id})`
+          : `Confluent Wire Format (#${rec.decoded.schema_id})`;
+        badgeClass = 'badge badge-warning';
+      } else if (rec.decoded.kind === 'protobuf') {
+        badgeText = `Protobuf: ${rec.decoded.message_name || 'Message'}`;
+        badgeClass = 'badge badge-warning';
+      } else if (rec.decoded.kind === 'json') {
+        badgeText = 'JSON';
+        badgeClass = 'badge badge-success';
+      } else if (rec.decoded.kind === 'text') {
+        badgeText = 'Text';
+        badgeClass = 'badge badge-muted';
+      } else if (rec.decoded.kind === 'hex_dump') {
+        badgeText = `Binary Hex (${rec.decoded.raw_bytes || 0} bytes)`;
+        badgeClass = 'badge badge-danger';
       }
-    } catch (_) {
-      formatted = String(rec.value);
+      displayFormatted = rec.decoded.formatted;
+    } else {
+      try {
+        if (typeof rec.value === 'string') {
+          const parsed = JSON.parse(rec.value);
+          displayFormatted = JSON.stringify(parsed, null, 2);
+          badgeText = 'JSON';
+          badgeClass = 'badge badge-success';
+        } else {
+          displayFormatted = JSON.stringify(rec.value, null, 2);
+        }
+      } catch (_) {
+        displayFormatted = String(rec.value);
+      }
     }
 
-    const payloadObj = {
-      topic: rec.topic,
-      partition: rec.partition,
-      offset: rec.offset,
-      key: rec.key,
-      timestamp: rec.timestamp,
-      payload: formatted,
-    };
+    if (badgeEl) {
+      if (badgeText) {
+        badgeEl.textContent = badgeText;
+        badgeEl.className = badgeClass;
+        badgeEl.style.display = 'inline-block';
+      } else {
+        badgeEl.style.display = 'none';
+      }
+    }
 
-    codeEl.textContent = JSON.stringify(payloadObj, null, 2);
+    if (metaEl) {
+      metaEl.innerHTML = `<strong>Topic:</strong> <code>${escapeHTML(rec.topic)}</code> &bull; <strong>Partition:</strong> ${rec.partition} &bull; <strong>Offset:</strong> #${rec.offset} &bull; <strong>Key:</strong> <code>${rec.key ? escapeHTML(rec.key) : '(none)'}</code>`;
+    }
+
+    codeEl.textContent = displayFormatted;
     modal.classList.add('open');
   }
 
