@@ -15,33 +15,84 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.24.x'
 
-      - name: Build Cross-Platform Binaries
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Build Cross-Platform Binaries & Archives
         run: |
           mkdir -p dist
-          PLATFORMS=(
-            "linux/amd64/pocketqueue-linux-amd64"
-            "linux/arm64/pocketqueue-linux-arm64"
-            "darwin/amd64/pocketqueue-darwin-amd64"
-            "darwin/arm64/pocketqueue-darwin-arm64"
-            "windows/amd64/pocketqueue-windows-amd64.exe"
-            "windows/arm64/pocketqueue-windows-arm64.exe"
+          TAG_NAME="${GITHUB_REF_NAME}"
+          VERSION="${TAG_NAME#v}"
+          echo "Building PocketQueue version ${VERSION} (${TAG_NAME})"
+
+          TARGETS=(
+            "linux/amd64"
+            "linux/arm64"
+            "darwin/amd64"
+            "darwin/arm64"
+            "windows/amd64"
+            "windows/arm64"
           )
 
-          for PLATFORM in "${PLATFORMS[@]}"; do
-            PARTS=(${PLATFORM//\// })
-            OS=${PARTS[0]}
-            ARCH=${PARTS[1]}
-            OUT="dist/${PARTS[2]}"
+          for TARGET in "${TARGETS[@]}"; do
+            IFS="/" read -r OS ARCH <<< "$TARGET"
+            EXT=""
+            if [ "$OS" = "windows" ]; then
+              EXT=".exe"
+            fi
 
-            echo "Building $OS/$ARCH -> $OUT"
-            GOOS=$OS GOARCH=$ARCH CGO_ENABLED=0 go build -ldflags="-s -w" -o "$OUT" ./cmd/pocketqueue
+            BIN_NAME="pocketqueue${EXT}"
+            BUILD_DIR="build-${OS}-${ARCH}"
+            mkdir -p "$BUILD_DIR"
+
+            echo "Compiling ${OS}/${ARCH} -> ${BUILD_DIR}/${BIN_NAME}"
+            GOOS=$OS GOARCH=$ARCH CGO_ENABLED=0 go build -ldflags="-s -w" -o "${BUILD_DIR}/${BIN_NAME}" ./cmd/pocketqueue
+
+            # Copy LICENSE into build directory for packaging
+            cp LICENSE "${BUILD_DIR}/"
+
+            # Create standalone uncompressed binary in dist/
+            cp "${BUILD_DIR}/${BIN_NAME}" "dist/pocketqueue-${OS}-${ARCH}${EXT}"
+
+            # Create package manager archive
+            if [ "$OS" = "windows" ]; then
+              ARCHIVE="dist/pocketqueue-${OS}-${ARCH}.zip"
+              (cd "$BUILD_DIR" && zip -9 "../${ARCHIVE}" "${BIN_NAME}" LICENSE)
+            else
+              ARCHIVE="dist/pocketqueue-${OS}-${ARCH}.tar.gz"
+              tar -czf "$ARCHIVE" -C "$BUILD_DIR" "${BIN_NAME}" LICENSE
+            fi
+
+            rm -rf "$BUILD_DIR"
           done
+
+          # Compute SHA-256 Checksums
+          cd dist
+          sha256sum * > checksums.txt
+          cat checksums.txt
+          cd ..
+
+      - name: Update Formula and Scoop Manifests
+        run: |
+          python3 scripts/update-packaging.py --version "${GITHUB_REF_NAME}" --checksums dist/checksums.txt
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/pocketqueue.rb packaging/scoop/pocketqueue.json
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "chore(release): update Homebrew formula and Scoop manifest for ${GITHUB_REF_NAME}"
+            git push origin HEAD:main || true
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -50,4 +101,3 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-

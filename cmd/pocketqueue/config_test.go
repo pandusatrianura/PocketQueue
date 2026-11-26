@@ -33,6 +33,8 @@ func TestConfig_ChaosFields(t *testing.T) {
 		ChaosDuplicateRate: 0.05,
 		RetentionBytes:     50 * 1024 * 1024,
 		DrainTimeout:       500 * 1000 * 1000,
+		HTTPPort:           8080,
+		DLQWebhookURL:      "http://127.0.0.1:8080/dlq",
 	}
 
 	if cfg.ChaosLatency != 100 || cfg.ChaosLatencyRate != 0.5 || cfg.ChaosDropRate != 0.1 || cfg.ChaosDuplicateRate != 0.05 {
@@ -40,5 +42,11 @@ func TestConfig_ChaosFields(t *testing.T) {
 	}
 	if cfg.RetentionBytes != 50*1024*1024 {
 		t.Errorf("unexpected retention bytes: %d", cfg.RetentionBytes)
+	}
+	if cfg.HTTPPort != 8080 {
+		t.Errorf("unexpected HTTP port: %d", cfg.HTTPPort)
+	}
+	if cfg.DLQWebhookURL != "http://127.0.0.1:8080/dlq" {
+		t.Errorf("unexpected DLQ webhook URL: %s", cfg.DLQWebhookURL)
 	}
 }

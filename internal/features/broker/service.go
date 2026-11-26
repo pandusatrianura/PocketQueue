@@ -291,6 +291,9 @@ func (s *Service) CommitOffset(ctx context.Context, groupID, topic string, parti
 	}
 
 	tOffsets[partition] = offset
+	if s.offsetStore != nil {
+		_ = s.offsetStore.Save(s.groupOffsets)
+	}
 	return nil
 }
 
@@ -342,6 +345,9 @@ func (s *Service) ResetAllOffsets(ctx context.Context, topic string) error {
 				partMap[p] = 0
 			}
 		}
+	}
+	if s.offsetStore != nil {
+		_ = s.offsetStore.Save(s.groupOffsets)
 	}
 	return nil
 }
@@ -437,6 +443,10 @@ func (s *Service) Close() error {
 		return nil
 	}
 	s.closed = true
+
+	if s.offsetStore != nil {
+		_ = s.offsetStore.Close()
+	}
 
 	if s.eventBus != nil {
 		s.eventBus.Close()

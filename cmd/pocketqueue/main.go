@@ -15,6 +15,7 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/pandusatrianura/pocketqueue/internal/features/broker"
 	"github.com/pandusatrianura/pocketqueue/internal/features/demo"
+	protocolhttp "github.com/pandusatrianura/pocketqueue/internal/features/protocol/http"
 	"github.com/pandusatrianura/pocketqueue/internal/features/protocol/kafka"
 	"github.com/pandusatrianura/pocketqueue/internal/features/protocol/redis"
 	"github.com/pandusatrianura/pocketqueue/internal/features/storage"
@@ -23,6 +24,11 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Println("PocketQueue v0.7.0")
+		os.Exit(0)
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "ping" {
 		if err := runPingCommand(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "❌ Healthcheck Failed: %v\n", err)
@@ -194,6 +200,26 @@ func main() {
 		defer redisServer.Close()
 	}
 
+	// 4. Start HTTP REST & SSE Protocol Server (port 8080)
+	var httpServer *protocolhttp.Server
+	if cfg.HTTPPort > 0 {
+		httpAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.HTTPPort)
+		httpServer = protocolhttp.NewServer(httpAddr, brokerSvc, bus, nil)
+		if err := httpServer.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error starting HTTP protocol bridge: %v\n", err)
+			os.Exit(1)
+		}
+		defer httpServer.Close()
+	}
+
+	// 5. Start Webhook DLQ Dispatcher if configured
+	var dlqDispatcher *broker.WebhookDLQDispatcher
+	if cfg.DLQWebhookURL != "" {
+		dlqDispatcher = broker.NewWebhookDLQDispatcher(cfg.DLQWebhookURL, bus, nil, nil)
+		dlqDispatcher.Start()
+		defer dlqDispatcher.Close()
+	}
+
 	// Setup OS interrupt trap
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -223,6 +249,12 @@ func main() {
 		}
 		if redisServer != nil {
 			endpoints += fmt.Sprintf("Redis:%s ", redisServer.Addr())
+		}
+		if httpServer != nil {
+			endpoints += fmt.Sprintf("HTTP:%s ", httpServer.Addr())
+		}
+		if dlqDispatcher != nil {
+			endpoints += fmt.Sprintf("DLQ-Webhook:%s ", cfg.DLQWebhookURL)
 		}
 		storageMode := "In-Memory"
 		if cfg.DataDir != "" {
@@ -258,6 +290,20 @@ func main() {
 			go func() {
 				defer drainWg.Done()
 				_ = redisServer.CloseWithTimeout(cfg.DrainTimeout)
+			}()
+		}
+		if httpServer != nil {
+			drainWg.Add(1)
+			go func() {
+				defer drainWg.Done()
+				_ = httpServer.CloseWithTimeout(cfg.DrainTimeout)
+			}()
+		}
+		if dlqDispatcher != nil {
+			drainWg.Add(1)
+			go func() {
+				defer drainWg.Done()
+				_ = dlqDispatcher.Close()
 			}()
 		}
 		drainWg.Wait()

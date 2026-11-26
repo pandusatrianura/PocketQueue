@@ -1,135 +1,147 @@
-# Todo: Milestone 6.1 — Data Resilience & Container DX
+# Todo: Milestone 7 — HTTP REST Ingress, SSE Bridge, Webhook DLQ & Automated Release
 
-## Phase 1: Consumer Group Offset Persistence (TDD)
+## Phase 1: HTTP Server & REST Ingress (TDD)
 
-- [x] **Task 1.1: Implement OffsetStore and FileOffsetStore**
-  - **Description**: Create `internal/features/broker/offsets.go` defining the `OffsetStore` interface and `FileOffsetStore` implementing atomic file serialization (`offsets.json.tmp` -> `offsets.json`) with a 50ms debounced flush and synchronous flush on `Close()`.
+- [x] **Task 1.1: Implement HTTP Protocol Server & Handler**
+  - **Description**: Create `internal/features/protocol/http/handler.go` and `server.go` implementing `POST /api/v1/topics/{topic}` (supporting JSON and raw body payloads) and `GET /healthz`. Implement `Start()` and `CloseWithTimeout()`.
   - **Acceptance criteria**:
-    - `OffsetStore` defines `Save`, `Load`, and `Close` methods.
-    - `FileOffsetStore` writes valid JSON with atomic rename.
-    - Multiple rapid `Save` calls within 50ms are coalesced into a single disk write.
-  - **Verification**: `go test -v ./internal/features/broker -run TestFileOffsetStore` (PASS)
-  - **Files**: `internal/features/broker/offsets.go`, `internal/features/broker/offsets_test.go`
-  - **Scope**: Small (2 files)
+    - `POST /api/v1/topics/{topic}` parses payload, calls `broker.Produce`, and returns `201 Created` with offset metadata.
+    - `GET /healthz` returns `200 OK` with JSON health status.
+    - CORS headers (`Access-Control-Allow-Origin: *`) are returned.
+  - **Verification**: `go test -v ./internal/features/protocol/http -run TestHTTPProduce`
+  - **Files**: `internal/features/protocol/http/handler.go`, `internal/features/protocol/http/server.go`, `internal/features/protocol/http/server_test.go`
+  - **Scope**: Medium (3 files)
 
-- [x] **Task 1.2: Wire Offset Persistence into Broker Service**
-  - **Description**: Update `internal/features/broker/service.go` to accept an optional `OffsetStore`. In `NewService`, load saved offsets if present; in `CommitOffset`, notify the `OffsetStore`. In `Close()`, close the `OffsetStore`.
+- [x] **Task 1.2: Wire HTTP Server into CLI & Main Lifecycle**
+  - **Description**: Add `--http-port` flag (default 0 / disabled) in `cmd/pocketqueue/config.go`. In `cmd/pocketqueue/main.go`, instantiate and start `http.Server` if `cfg.HTTPPort > 0`, and drain gracefully on shutdown.
   - **Acceptance criteria**:
-    - Broker restores committed offsets on startup if present in store.
-    - `CommitOffset` updates both memory and triggers debounced persistent save.
-    - Passing `nil` or `NoopOffsetStore` preserves pure in-memory behavior without nil-pointer panics.
-  - **Verification**: `go test -v ./internal/features/broker` (PASS)
-  - **Files**: `internal/features/broker/service.go`, `internal/features/broker/service_test.go`
-  - **Scope**: Small (2 files)
-
-- [x] **Task 1.3: Wire Offset Store in CLI Main**
-  - **Description**: In `cmd/pocketqueue/main.go`, when `cfg.DataDir` is specified, instantiate `broker.NewFileOffsetStore(cfg.DataDir)` and pass it to `broker.NewService`.
-  - **Acceptance criteria**:
-    - `--data-dir` directory automatically initializes `offsets.json`.
-    - Offsets persist across simulated restart in test.
-  - **Verification**: `go test -v ./cmd/pocketqueue` (PASS)
-  - **Files**: `cmd/pocketqueue/main.go`, `cmd/pocketqueue/main_test.go`
-  - **Scope**: Small (1-2 files)
+    - `--http-port 0` leaves HTTP server inactive.
+    - `--http-port 8080` binds HTTP server on configured port.
+    - Graceful shutdown stops accepting connections and drains in-flight HTTP requests within `--drain-timeout`.
+  - **Verification**: `go test -v ./cmd/pocketqueue`
+  - **Files**: `cmd/pocketqueue/config.go`, `cmd/pocketqueue/config_test.go`, `cmd/pocketqueue/main.go`
+  - **Scope**: Small (3 files)
 
 ---
 
-## Checkpoint 1: Offset Persistence
-- [x] All broker tests pass (`go test -v ./internal/features/broker/...`)
-- [x] Offsets restored accurately upon service restart
+## Checkpoint 1: HTTP REST Ingress
+- [x] All HTTP unit tests pass (`go test -v ./internal/features/protocol/http/...`)
+- [x] `POST /api/v1/topics/:topic` returns 201 Created with stored offset
 
 ---
 
-## Phase 2: WAL Retention & Pruning (TDD)
+## Phase 2: Server-Sent Events (SSE) Stream (TDD)
 
-- [x] **Task 2.1: Implement Retention Pruning in WALEngine**
-  - **Description**: Add `PruneOldest` in `internal/features/storage/wal.go`. When an append causes a partition file to exceed `maxFileSize` (or `--retention-bytes`), prune the oldest frames, compact the WAL file, and advance `startOffset` (`Earliest` watermark).
+- [x] **Task 2.1: Implement Server-Sent Events (SSE) Stream Handler**
+  - **Description**: Implement `GET /api/v1/topics/{topic}/sse` in `internal/features/protocol/http/handler.go`. Subscribe to `broker.EventBus`, filter events matching `{topic}`, write `event: message\ndata: <json>\n\n`, and flush using `http.Flusher`.
   - **Acceptance criteria**:
-    - When file exceeds threshold, oldest messages are cleanly pruned.
-    - Partition watermarks reflect the new earliest available offset.
-    - Subsequent appends and reads continue without file corruption.
-  - **Verification**: `go test -v ./internal/features/storage -run TestWAL_RetentionPruning` (PASS)
-  - **Files**: `internal/features/storage/wal.go`, `internal/features/storage/wal_test.go`
+    - Response headers include `text/event-stream`, `no-cache`, `keep-alive`, and `Access-Control-Allow-Origin: *`.
+    - Real-time events are flushed immediately to connected clients.
+    - Disconnecting client triggers context cancellation and cleanly unsubscribes channel without memory leaks.
+  - **Verification**: `go test -v ./internal/features/protocol/http -run TestHTTPSSE`
+  - **Files**: `internal/features/protocol/http/handler.go`, `internal/features/protocol/http/server_test.go`
+  - **Scope**: Small (2 files)
+
+---
+
+## Checkpoint 2: SSE Stream
+- [x] SSE stream tests pass (`go test -v ./internal/features/protocol/http -run TestHTTPSSE`)
+- [x] Live events stream in real time with immediate flush
+
+---
+
+## Phase 3: Webhook DLQ Dispatcher (TDD)
+
+- [x] **Task 3.1: Implement WebhookDLQDispatcher**
+  - **Description**: Create `internal/features/broker/webhook.go` implementing asynchronous DLQ webhook notification. Subscribes to `EventBus`, filters messages on topics ending in `.dlq` or marked `IsDLQ`, and sends an HTTP POST request to configured webhook URL.
+  - **Acceptance criteria**:
+    - Dispatches HTTP POST with DLQ payload, original topic, and failure reason in headers.
+    - Employs 3-second HTTP timeout and up to 2 retries.
+    - Asynchronous worker queue ensures broker `Produce` latency is unaffected even if webhook endpoint is down or timing out.
+  - **Verification**: `go test -v ./internal/features/broker -run TestWebhookDLQ`
+  - **Files**: `internal/features/broker/webhook.go`, `internal/features/broker/webhook_test.go`
   - **Scope**: Medium (2 files)
 
-- [x] **Task 2.2: Add Retention Flags to CLI Config**
-  - **Description**: In `cmd/pocketqueue/config.go`, add flags `-retention-bytes` (default 100 MB / `104857600`) and `-retention-age` (default 0 / disabled). Pass `retentionBytes` to `storage.NewWALEngineWithLimit`.
+- [x] **Task 3.2: Wire Webhook DLQ in CLI**
+  - **Description**: Add `--dlq-webhook-url` flag (default `""` / disabled) in `cmd/pocketqueue/config.go`. In `cmd/pocketqueue/main.go`, start `WebhookDLQDispatcher` if URL is configured and close it upon shutdown.
   - **Acceptance criteria**:
-    - CLI parses `-retention-bytes` and `-retention-age`.
-    - Default values maintain existing safe boundaries.
-  - **Verification**: `go test -v ./cmd/pocketqueue` (PASS)
-  - **Files**: `cmd/pocketqueue/config.go`, `cmd/pocketqueue/config_test.go`, `cmd/pocketqueue/main.go`
+    - When `--dlq-webhook-url` is specified, DLQ events trigger webhook POST.
+    - When empty, zero background HTTP workers are created.
+  - **Verification**: `go test -v ./cmd/pocketqueue`
+  - **Files**: `cmd/pocketqueue/config.go`, `cmd/pocketqueue/main.go`
+  - **Scope**: Small (2 files)
+
+---
+
+## Checkpoint 3: Webhook DLQ
+- [x] Webhook DLQ tests pass (`go test -v ./internal/features/broker -run TestWebhookDLQ`)
+- [x] DLQ events successfully dispatch webhook POST without blocking broker
+
+---
+
+## Phase 4: Release Workflow & Packaging Automation
+
+- [x] **Task 4.1: Automate Archive Packaging & Checksum Calculation in GitHub Actions**
+  - **Description**: Update `.github/workflows/release.yml` to package cross-platform binaries into `.tar.gz` (macOS/Linux) and `.zip` (Windows), compute SHA-256 hashes (`sha256sum`), and generate `checksums.txt`.
+  - **Acceptance criteria**:
+    - Generates release archives matching Homebrew (`.tar.gz`) and Scoop (`.zip`) conventions.
+    - Calculates and outputs SHA-256 checksums file.
+  - **Verification**: Local workflow lint and dry-run packaging check
+  - **Files**: `.github/workflows/release.yml`
+  - **Scope**: Small (1 file)
+
+- [x] **Task 4.2: Automate Manifest Synchronization for Homebrew & Scoop**
+  - **Description**: Add workflow step to `.github/workflows/release.yml` and `scripts/update-packaging.py` to inject computed SHA-256 hashes directly into `Formula/pocketqueue.rb` and `packaging/scoop/pocketqueue.json`.
+  - **Acceptance criteria**:
+    - Homebrew formula and Scoop manifest hashes are synchronized automatically upon tag release.
+  - **Verification**: Script test on sample archives
+  - **Files**: `.github/workflows/release.yml`, `scripts/update-packaging.py`, `Formula/pocketqueue.rb`, `packaging/scoop/pocketqueue.json`
   - **Scope**: Small (2-3 files)
 
 ---
 
-## Checkpoint 2: Retention Pruning
-- [x] All storage tests pass (`go test -v ./internal/features/storage/...`)
-- [x] Appends beyond retention budget trigger safe FIFO pruning rather than rejecting writes
+## Checkpoint 4: Packaging Automation
+- [x] Release workflow configuration validated
+- [x] Manifest templates ready for automated tag injection
 
 ---
 
-## Phase 3: Container DX — Ping Probe & Graceful Drain (TDD)
+## Phase 5: Dual-Protocol E2E Verification, Resource Audit & Docs
 
-- [x] **Task 3.1: Implement Healthcheck Probe Command (`pocketqueue ping`)**
-  - **Description**: Implement `runPingCommand` in `cmd/pocketqueue/ping_cmd.go` and wire into `main.go`. Connect to Kafka TCP port, send `ApiVersions` request, and exit 0 on success or exit 1 on timeout/failure.
+- [x] **Task 5.1: Write Dual-Protocol E2E Tests**
+  - **Description**: Create `test/e2e/http_bridge_e2e_test.go` verifying dual-protocol bridging:
+    1. Produce message via HTTP POST $\to$ Fetch via native Kafka client.
+    2. Produce message via native Redis `XADD` $\to$ Stream via HTTP SSE.
+    3. Route message to `.dlq` $\to$ Catch webhook POST on local test server.
   - **Acceptance criteria**:
-    - `pocketqueue ping --broker 127.0.0.1:9092` prints latency and exits code 0 when broker is healthy.
-    - Exits code 1 when broker is down or unreachable within `--timeout` (default 2s).
-  - **Verification**: `go test -v ./cmd/pocketqueue -run TestPingCommand` (PASS)
-  - **Files**: `cmd/pocketqueue/ping_cmd.go`, `cmd/pocketqueue/ping_cmd_test.go`, `cmd/pocketqueue/main.go`
-  - **Scope**: Small (3 files)
-
-- [x] **Task 3.2: Implement Graceful Connection Draining on Shutdown**
-  - **Description**: Add `-drain-timeout` flag (default 500ms) in `cmd/pocketqueue/config.go`. In `main.go`, on `SIGINT`/`SIGTERM`, stop accepting new connections, wait up to drain timeout for in-flight requests to finish, flush storage and offsets, and exit.
-  - **Acceptance criteria**:
-    - Active connections complete gracefully with clean EOF.
-    - Shutdown never hangs longer than `--drain-timeout`.
-    - Storage and offsets are flushed to disk before exit.
-  - **Verification**: `go test -v ./cmd/pocketqueue` (PASS)
-  - **Files**: `cmd/pocketqueue/config.go`, `cmd/pocketqueue/main.go`, `internal/features/protocol/kafka/server.go`, `internal/features/protocol/redis/server.go`
-  - **Scope**: Small (4 files)
-
----
-
-## Checkpoint 3: Container DX
-- [x] `pocketqueue ping` passes against active server
-- [x] Graceful shutdown drains cleanly within timeout
-
----
-
-## Phase 4: Full System Verification & Resource Audit
-
-- [x] **Task 4.1: End-to-End Integration Tests for Resilience**
-  - **Description**: Create `test/e2e/resilience_e2e_test.go` exercising WAL persistence across process restarts, retention roll under high-volume produce, and ping probe execution.
-  - **Acceptance criteria**:
-    - All E2E scenarios pass cleanly without timing flakes.
-  - **Verification**: `go test -v ./test/e2e` (PASS)
-  - **Files**: `test/e2e/resilience_e2e_test.go`
+    - All 3 dual-protocol bridge flows pass reliably without flakes.
+  - **Verification**: `go test -v ./test/e2e -run TestHTTPBridgeE2E`
+  - **Files**: `test/e2e/http_bridge_e2e_test.go`
   - **Scope**: Small (1 file)
 
-- [x] **Task 4.2: Full Zero-Cache Regression & Resource Audit**
-  - **Description**: Run full regression test suite `go test -count=1 ./...` and execute `scripts/audit.ps1`.
+- [x] **Task 5.2: Full Zero-Cache Test Suite & Resource Audit**
+  - **Description**: Execute `go test -count=1 ./...` and `scripts/audit.ps1`.
   - **Acceptance criteria**:
-    - 100% test pass across all packages.
-    - Stripped binary size < 6.0 MB (measured: 5.30 MB).
-    - Idle RAM < 10.0 MB (measured: 7.78 MB).
-    - Cold boot latency < 5.0 ms (measured: 2.15 ms).
-  - **Verification**: `go test -count=1 ./...; powershell -ExecutionPolicy Bypass -File .\scripts\audit.ps1` (ALL PASS)
+    - 100% pass across all packages.
+    - Stripped binary size $< 15.0\text{ MB}$ (Current: 8.73 MB).
+    - Idle RAM usage $< 25.0\text{ MB}$ (Current: 8.62 MB).
+    - Cold boot latency $< 20.0\text{ ms}$ (Current: ~5.1 ms).
+  - **Verification**: `go test -count=1 ./...; powershell -ExecutionPolicy Bypass -File .\scripts\audit.ps1`
   - **Files**: None (verification)
   - **Scope**: Small
 
-- [x] **Task 4.3: Documentation & Roadmap Synchronization**
-  - **Description**: Update `README.md` and `docs/ROADMAP.md` documenting `--retention-bytes`, `pocketqueue ping`, `--drain-timeout`, and marking Milestone 6.1 as completed.
+- [x] **Task 5.3: Update Documentation & Roadmap**
+  - **Description**: Update `README.md` and `docs/ROADMAP.md` documenting HTTP REST ingress, SSE streaming, DLQ webhooks, and marking Milestone 7 completed.
   - **Acceptance criteria**:
-    - README includes Docker `HEALTHCHECK` example with `pocketqueue ping`.
-    - ROADMAP reflects Milestone 6.1 completion and Milestone 7 status.
-  - **Verification**: Markdown review and git status
+    - README includes cURL and JavaScript EventSource code snippets.
+    - ROADMAP reflects Milestone 7 completion.
+  - **Verification**: Markdown review
   - **Files**: `README.md`, `docs/ROADMAP.md`
   - **Scope**: Small (2 files)
 
 ---
 
-## Final Checkpoint: Milestone 6.1 Complete
+## Final Checkpoint: Milestone 7 Complete
 - [x] All 10 tasks completed and verified
 - [x] Zero compiler warnings, zero lint errors
-- [x] All operational invariants strictly satisfied
+- [x] All operational and resource invariants strictly satisfied

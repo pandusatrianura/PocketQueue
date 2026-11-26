@@ -112,25 +112,29 @@ This roadmap outlines the evolution of PocketQueue while adhering strictly to th
   - Added `--drain-timeout` (default 500ms).
   - On `SIGINT`/`SIGTERM`: immediately stops accepting new connections, drains in-flight requests cleanly, flushes storage and offset state, and exits gracefully.
 
+### Milestone 7: HTTP REST Ingress, SSE Bridge & Packaging Automation ✅
+*Objective: Universal browser and webhook connectivity without requiring Kafka/Redis client SDKs.*
+- **HTTP REST Ingress**:
+  - Minimalist HTTP server (`--http-port <port>`, disabled by default `0`).
+  - `POST /api/v1/topics/:topic` endpoint accepting JSON/binary payloads with automatic partition routing, CORS headers, and standard metadata response.
+  - Health probe endpoint `GET /healthz` returning JSON service readiness.
+- **Server-Sent Events (SSE) Stream Bridge**:
+  - `GET /api/v1/topics/:topic/sse` endpoint allowing frontend apps (React, Vue, Svelte) to consume live event streams via standard browser `EventSource`.
+  - Immediate `http.Flusher` streaming and automatic channel unsubscription on client disconnect.
+- **Webhook Dead-Letter Queue (DLQ) Notification**:
+  - Asynchronous worker queue forwarding dead-letter events (`.dlq` / `IsDLQ`) to `--dlq-webhook-url`.
+  - Non-blocking design with 3s timeout, up to 2 retries, and headers forwarding original topic and failure reason.
+- **Automated SHA-256 Release Distribution**:
+  - Enhanced `.github/workflows/release.yml` with multi-arch packaging (`.tar.gz` and `.zip`).
+  - Automated manifest synchronization (`scripts/update-packaging.py`) keeping `Formula/pocketqueue.rb` and `packaging/scoop/pocketqueue.json` updated on every git tag release.
+
 ---
 
 ## 🚀 Upcoming Milestones
 
-### Milestone 7: HTTP REST Ingress, SSE Bridge & Packaging Automation
-*Objective: Universal browser and webhook connectivity without requiring Kafka/Redis client SDKs.*
-- **HTTP REST Ingress**:
-  - Minimalist HTTP server (`--http-port <port>`, disabled by default `0`).
-  - `POST /api/v1/topics/:topic` endpoint accepting JSON/binary payloads with automatic partition routing.
-- **Server-Sent Events (SSE) Stream Bridge**:
-  - `GET /api/v1/topics/:topic/sse` endpoint allowing frontend apps (React, Vue, Svelte) to consume live event streams via standard browser `EventSource`.
-- **Webhook Dead-Letter Queue (DLQ) Notification**:
-  - Automatically dispatch HTTP POST webhooks to external URLs when messages are routed to DLQ topics (`*.dlq`).
-- **Automated SHA-256 Release Distribution**:
-  - Enhance `.github/workflows/release.yml` to compute release archive checksums and automatically update the Homebrew formula and Scoop manifest on every git tag.
-
-### Milestone 7: Webhook / HTTP Ingress Bridge (Optional Headless Adapter)
-- Expose lightweight REST / SSE endpoint on port `:8080` for event streaming into web browsers without custom clients.
-- Webhook trigger destination for Dead-Letter Queue event notifications.
+### Milestone 8: Embedded WASM Transformations & Edge Replication
+- Lightweight WebAssembly (WASM) payload transform pipelines for inline schema mutation and message filtering.
+- Lightweight peer-to-peer / edge broker synchronization for local multi-instance development.
 
 ---
 

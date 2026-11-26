@@ -1,130 +1,90 @@
-# Implementation Plan: Milestone 6.1 — Data Resilience & Container DX
+# Implementation Plan: Milestone 7 — HTTP REST Ingress, SSE Bridge, Webhook DLQ & Automated Release
 
 ## 1. Overview
 
-Milestone 6.1 hardens PocketQueue for container-native production environments, edge appliances, and single-box microservices. It delivers four core enhancements:
-1. **Consumer Group Offset Persistence**: Durable storage of consumer group offsets on disk when `--data-dir` is active, using atomic writes and a 50ms debounced sync.
-2. **Automated WAL Retention & Pruning**: Safe log rolling and FIFO pruning of oldest frames when partition files exceed `--retention-bytes` (default 100 MB) or `--retention-age`, advancing partition watermarks cleanly without dropping writes.
-3. **Built-in Healthcheck Probe (`pocketqueue ping`)**: Single CLI probe command communicating via Kafka TCP protocol, exiting code 0 on healthy broker and code 1 on failure.
-4. **Graceful Connection Draining**: Configurable shutdown drain timeout (`--drain-timeout`, default 500ms) to allow in-flight fetch and produce requests to complete cleanly with EOF before sockets terminate.
+Milestone 7 expands PocketQueue's accessibility by introducing a native HTTP/REST ingress and Server-Sent Events (SSE) streaming bridge, an asynchronous Webhook DLQ notification dispatcher, and automated release archive packaging with SHA-256 checksum injection for Homebrew and Scoop.
+
+All functionality is implemented using Go's standard library (`net/http`, zero external dependencies), keeping the single binary strictly $< 6.0\text{ MB}$, idle RAM $< 10.0\text{ MB}$, and cold boot $< 5.0\text{ ms}$.
 
 ---
 
 ## 2. Architecture Decisions & Rationale
 
-### A. Offset Storage Abstraction (`OffsetStore`)
-- **Location**: `internal/features/broker/offsets.go`
-- **Pattern**: Interface abstraction with two implementations:
-  1. `NoopOffsetStore`: Pure in-memory (used when `--data-dir` is empty).
-  2. `FileOffsetStore`: Thread-safe, atomic file writer (`offsets.json.tmp` -> `offsets.json`) with a 50ms debounced timer and an immediate flush on `Close()`.
-- **Rationale**: Isolates file I/O behind an interface so unit tests run at microsecond speeds in memory, while production runs with disk persistence. The 50ms debounced flush guarantees > 10,000 commits/sec without disk I/O bottlenecks.
+### A. HTTP Protocol Slice (`internal/features/protocol/http`)
+- **Location**: `internal/features/protocol/http/server.go`, `handler.go`
+- **Pattern**: Standard library `http.Server` and `http.ServeMux` (Go 1.22+ method matching).
+- **Default**: Disabled (`--http-port 0`) by default. Starts only when `--http-port <port>` is explicitly passed.
+- **Endpoints**:
+  - `POST /api/v1/topics/{topic}`: Publishes JSON or raw payload to the broker, returns `201 Created` with offset and partition metadata.
+  - `GET /api/v1/topics/{topic}/sse`: Real-time Server-Sent Events stream delivering new records to web clients via `EventSource`.
+  - `GET /healthz`: Returns `200 OK` with JSON health status for load balancers.
+- **CORS**: `Access-Control-Allow-Origin: *` enabled on SSE to allow frontend dev servers (`localhost:3000`, `localhost:5173`) to connect seamlessly.
 
-### B. Storage Retention & Rolling Pruning
-- **Location**: `internal/features/storage/storage.go`, `wal.go`
-- **Pattern**: Add `PruneOldest(topic string, partition int32, bytesToFree int64) (prunedCount int, newEarliest int64, err error)` to `WALEngine`.
-- **Trigger**: When an `Append` causes the partition file size to cross `maxFileSize` (or `--retention-bytes`), the WAL engine prunes the oldest index records and rewrites the remaining valid frames to a compacted WAL file, updating `Earliest` watermark.
-- **Rationale**: Replaces the blunt `ErrWALFileSizeLimitExceeded` error with graceful FIFO rolling, ensuring continuous 24/7 operation on edge devices without manual restarts.
+### B. EventBus Subscription for SSE
+- **Pattern**: SSE handler calls `eventBus.Subscribe()`, filters records matching requested topic, writes `event: message\ndata: ...\n\n`, and flushes immediately using `http.Flusher`.
+- **Resource Guard**: On client connection termination (`r.Context().Done()`), the subscription channel is immediately unsubscribed and closed to prevent goroutine and memory leaks.
 
-### C. Healthcheck Probe Subcommand (`pocketqueue ping`)
-- **Location**: `cmd/pocketqueue/ping_cmd.go`, `main.go`
-- **Pattern**: Dial target broker address (`127.0.0.1:9092`), send standard Kafka `ApiVersions` (Key 18) request with a timeout (default 2s), and check for response error code 0.
-- **Rationale**: Native, zero-dependency container probe compatible with Docker `HEALTHCHECK` and Kubernetes `livenessProbe` / `readinessProbe`.
+### C. Webhook DLQ Dispatcher (`internal/features/broker/webhook.go`)
+- **Pattern**: Asynchronous worker pool listening to `EventBus`. When a record on a `*.dlq` topic or with `rec.IsDLQ` arrives, it dispatches an HTTP POST request to `--dlq-webhook-url`.
+- **Resilience**: Configured with strict 3-second timeout, 2 retries, and bounded queue capacity. Unreachable webhook endpoints will never block or degrade core broker ingestion throughput.
 
-### D. Graceful Connection Draining on Shutdown
-- **Location**: `cmd/pocketqueue/main.go`, `internal/features/protocol/kafka/server.go`, `redis/server.go`
-- **Pattern**: When `SIGINT`/`SIGTERM` arrives:
-  1. Close listener socket so new incoming connection attempts are rejected.
-  2. Wait up to `--drain-timeout` (default 500ms) for active requests to finish and socket handlers to exit.
-  3. Flush `OffsetStore` and `storage.Engine.Sync()`.
-  4. Exit cleanly.
-- **Rationale**: Prevents broken pipe and connection reset errors in client consumer worker pools during container rolling restarts.
+### D. Release Automation (`.github/workflows/release.yml`)
+- **Pattern**: During release workflow, bundle binaries into `.tar.gz` (macOS/Linux) and `.zip` (Windows), compute SHA-256 hashes, generate `checksums.txt`, and automatically inject matching hashes into `Formula/pocketqueue.rb` and `packaging/scoop/pocketqueue.json`.
 
 ---
 
-## 3. Dependency Graph & Implementation Sequence
+## 3. Implementation Phases & Task Breakdown
 
-```
-Step 1: OffsetStore Interface & FileOffsetStore (Foundation)
-   │
-   ├── Step 2: Wire Offset Persistence into broker.Service (Core Data)
-   │
-Step 3: WAL Retention & Pruning Logic in storage.WALEngine (Storage Foundation)
-   │
-   ├── Step 4: Wire Retention CLI Flags & broker integration (Core Storage)
-   │
-Step 5: Healthcheck Probe Subcommand `pocketqueue ping` (Container DX)
-   │
-Step 6: Graceful Connection Draining & Signal Handling (Lifecycle DX)
-   │
-Step 7: Full System Verification, E2E Tests, and Performance Audit (Verification)
-```
+### Phase 1: HTTP Protocol Server & REST Ingress (TDD)
+- **Task 1.1**: Create `internal/features/protocol/http/handler.go` and `server.go` implementing `POST /api/v1/topics/{topic}` and `GET /healthz`.
+- **Task 1.2**: Write unit tests in `internal/features/protocol/http/server_test.go` verifying produce contract, error codes, and graceful shutdown.
+- **Task 1.3**: Wire `--http-port` flag in `cmd/pocketqueue/config.go` and `cmd/pocketqueue/main.go`.
 
----
+### Checkpoint 1: HTTP REST Ingress
+- [x] Unit tests pass (`go test -v ./internal/features/protocol/http -run TestHTTPProduce`).
+- [x] `POST /api/v1/topics/:topic` stores messages and returns `201 Created`.
 
-## 4. Phase Breakdown & Tasks
+### Phase 2: Server-Sent Events (SSE) Stream (TDD)
+- **Task 2.1**: Implement `GET /api/v1/topics/{topic}/sse` in `internal/features/protocol/http/handler.go`.
+- **Task 2.2**: Write unit tests in `server_test.go` verifying SSE headers, live event delivery from `EventBus`, and clean unsubscription on context cancellation.
 
-### Phase 1: Data Resilience — Offset Persistence (TDD)
-- **Task 1.1**: Define `OffsetStore` interface and implement `FileOffsetStore` in `internal/features/broker/offsets.go` with atomic write, 50ms debounced flush, and `Close()` sync.
-- **Task 1.2**: Write unit tests in `internal/features/broker/offsets_test.go` verifying save, load, debouncing, and atomic recovery.
-- **Task 1.3**: Wire `OffsetStore` into `broker.Service`: restore offsets in `NewService` and persist on `CommitOffset`.
-- **Task 1.4**: Update `cmd/pocketqueue/main.go` to pass `FileOffsetStore` when `--data-dir` is set.
+### Checkpoint 2: SSE Streaming Bridge
+- [x] Unit tests pass (`go test -v ./internal/features/protocol/http -run TestHTTPSSE`).
+- [x] Real-time event streaming verified with immediate flush.
 
-### Checkpoint 1: Offset Persistence
-- [ ] `go test -v ./internal/features/broker -run Offset` passes.
-- [ ] Broker restart with `--data-dir` preserves committed offsets across Kafka & Redis clients.
+### Phase 3: Webhook DLQ Dispatcher (TDD)
+- **Task 3.1**: Create `internal/features/broker/webhook.go` implementing `WebhookDLQDispatcher`.
+- **Task 3.2**: Write unit tests in `internal/features/broker/webhook_test.go` testing async POST dispatch, payload formatting, retries, and timeout resilience.
+- **Task 3.3**: Add `--dlq-webhook-url` flag in `cmd/pocketqueue/config.go` and wire into `main.go`.
 
-### Phase 2: Data Resilience — WAL Retention & FIFO Pruning (TDD)
-- **Task 2.1**: Implement `PruneOldest` in `internal/features/storage/wal.go` to remove oldest frames and update watermarks when file crosses budget.
-- **Task 2.2**: Write unit tests in `internal/features/storage/wal_test.go` testing retention pruning, watermark advancement, and subsequent append/read continuity.
-- **Task 2.3**: Add `--retention-bytes` (default 100 MB) and `--retention-age` flags to `cmd/pocketqueue/config.go` and pass to `WALEngine`.
+### Checkpoint 3: Webhook DLQ
+- [x] DLQ messages trigger asynchronous HTTP POST with metadata headers.
+- [x] Slow/down webhooks do not degrade broker throughput.
 
-### Checkpoint 2: Retention Pruning
-- [ ] `go test -v ./internal/features/storage -run WAL` passes.
-- [ ] Producing beyond retention budget rolls logs without error and advances earliest watermark.
+### Phase 4: Release Workflow & Packaging Automation
+- **Task 4.1**: Update `.github/workflows/release.yml` to package `.tar.gz` and `.zip` archives.
+- **Task 4.2**: Automate SHA-256 calculation and manifest update for `Formula/pocketqueue.rb` and `packaging/scoop/pocketqueue.json`.
 
-### Phase 3: Container DX — Healthcheck Probe & Graceful Drain (TDD)
-- **Task 3.1**: Implement `runPingCommand` in `cmd/pocketqueue/ping_cmd.go` with `--broker` and `--timeout` flags.
-- **Task 3.2**: Write unit test in `cmd/pocketqueue/ping_cmd_test.go` verifying exit code 0 on active broker and exit code 1 on down broker.
-- **Task 3.3**: Add `--drain-timeout` flag (default 500ms) in `config.go` and implement graceful connection draining in `main.go`.
+### Checkpoint 4: Automated Release Packaging
+- [x] Release workflow script validated with archive generation and SHA-256 checksums.
 
-### Checkpoint 3: Container DX
-- [ ] `pocketqueue ping` works reliably against running server.
-- [ ] Graceful shutdown drains connections cleanly before process exit.
-
-### Phase 4: Full System Verification & Resource Audit
-- **Task 4.1**: Create `test/e2e/resilience_e2e_test.go` testing end-to-end restart persistence, retention roll, and ping probe.
-- **Task 4.2**: Run zero-cache test suite: `go test -count=1 ./...`.
-- **Task 4.3**: Run `scripts/audit.ps1` to verify binary size (< 6.0 MB), idle RAM (< 10.0 MB), and cold boot (< 5.0 ms).
-- **Task 4.4**: Update documentation (`README.md` and `docs/ROADMAP.md` for Milestone 6.1).
+### Phase 5: Dual-Protocol E2E Verification, Resource Audit & Docs
+- **Task 5.1**: Create `test/e2e/http_bridge_e2e_test.go` testing dual-protocol bridging:
+  - HTTP POST $\to$ Kafka Fetch
+  - Redis XADD $\to$ HTTP SSE
+  - DLQ produce $\to$ Webhook POST
+- **Task 5.2**: Run zero-cache test suite: `go test -count=1 ./...`.
+- **Task 5.3**: Run resource audit: `powershell -ExecutionPolicy Bypass -File .\scripts\audit.ps1`.
+- **Task 5.4**: Synchronize documentation in `README.md` and `docs/ROADMAP.md`.
+- [x] All Phase 5 verification and documentation steps completed.
 
 ---
 
-## 5. Risks and Mitigations
+## 4. Risks and Mitigations
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Corrupt offset file on sudden crash | Lost consumer group offsets | Write to `offsets.json.tmp` first, then perform atomic file rename (`os.Rename`), backed by `fsync`. |
-| Disk I/O bottleneck from frequent commits | Decreased broker throughput | 50ms debounced sync groups thousands of commits into a single atomic write; immediate sync on graceful shutdown. |
-| WAL compaction race condition with active readers | Reader reads partial frame | Enforce read-write lock (`mu.Lock`) during pruning and compaction; readers hold `RLock`. |
-| Drain timeout hanging shutdown | Process fails to exit on SIGTERM | Hard deadline on drain context; unconditionally force-close sockets once timeout expires. |
-| Binary size expansion | Breaks project invariant (< 15 MB) | Use Go standard library only (`net`, `encoding/json`, `sync`, `time`); zero new dependencies. |
-
----
-
-## 6. Success Metrics & Verification Gate
-
-| Metric | Target | Hard Ceiling | Status |
-|---|---|---|---|
-| Stripped Binary Size | `< 6.0 MB` | `< 15.0 MB` | **5.30 MB (PASS)** |
-| Idle RAM Usage | `< 10.0 MB` | `< 25.0 MB` | **7.78 MB (PASS)** |
-| Cold Boot Latency | `< 5.0 ms` | `< 20.0 ms` | **2.15 ms (PASS)** |
-| Go Standard Library Only | 100% | 100% | **0 external dependencies (PASS)** |
-| Test Coverage Pass Rate | 100% | 100% | **100% (PASS)** |
-
----
-
-## 7. Execution Status: COMPLETED ✅
-- Phase 1 (Offset Persistence): 100% complete and verified.
-- Phase 2 (WAL Retention & FIFO Rolling Pruning): 100% complete and verified.
-- Phase 3 (Container DX — Ping Probe & Graceful Drain): 100% complete and verified.
-- Phase 4 (Full System Verification & Resource Audit): 100% complete and all resource constraints verified.
+| Unclosed SSE connections consuming memory | Memory leak in long-running broker | Unsubscribe from `EventBus` immediately when client request context is canceled (`<-r.Context().Done()`). |
+| External webhook server slow/down | Goroutine explosion or blocked broker | Dedicated bounded worker pool (capacity 100), 3-second HTTP timeout, non-blocking fire-and-forget channel send. |
+| CORS issues when called from browser | Browser blocks SSE or POST | Return standard CORS headers (`Access-Control-Allow-Origin: *`, `Access-Control-Allow-Headers: *`, `Access-Control-Allow-Methods: POST, GET, OPTIONS`). |
+| Binary size expansion | Violates $< 15.0\text{ MB}$ project ceiling | Use `net/http` from standard library only. Zero third-party web frameworks. |

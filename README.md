@@ -139,6 +139,38 @@ PocketQueue allows Kafka and Redis clients to communicate through the same broke
 - Microservice B consumes from Kafka topic `orders` at `localhost:9092`
 - All events appear unified inside the same PocketQueue TUI!
 
+### Workflow 5: HTTP REST Ingress & Server-Sent Events (SSE) Stream
+Bridge web applications (React, Vue, Svelte, or mobile web) without requiring Kafka or Redis client libraries:
+
+1. **Start PocketQueue with HTTP Bridge**:
+   ```bash
+   ./bin/pocketqueue --http-port 8080
+   ```
+
+2. **Publish via cURL / REST API**:
+   ```bash
+   curl -X POST http://localhost:8080/api/v1/topics/chat \
+     -H "Content-Type: application/json" \
+     -d '{"key": "user-42", "value": {"message": "Hello from browser!"}}'
+   ```
+
+3. **Stream Events via Native Browser `EventSource`**:
+   ```javascript
+   const eventSource = new EventSource("http://localhost:8080/api/v1/topics/chat/sse");
+
+   eventSource.onmessage = (event) => {
+     const data = JSON.parse(event.data);
+     console.log("Real-time event received:", data.key, data.value);
+   };
+   ```
+
+### Workflow 6: Dead-Letter Queue (DLQ) Webhook Dispatcher
+Automatically forward dead-letter messages to an external incident response or notification service:
+```bash
+./bin/pocketqueue --dlq-webhook-url http://alertmanager.local/api/v1/alerts
+```
+When any message fails processing and is routed to a `.dlq` topic, PocketQueue's non-blocking background dispatcher sends an HTTP POST with custom headers (`x-dlq-original-topic`, `x-dlq-reason`) and up to 2 retries without stalling broker throughput.
+
 ---
 
 ## 🔌 Verified Client SDK Compatibility
@@ -202,6 +234,8 @@ PocketQueue requires zero configuration by default, but provides fine-grained co
 | `--host` | `127.0.0.1` | Binding network host | Use `127.0.0.1` for local safety; use `0.0.0.0` inside Docker or LAN |
 | `--port` | `9092` | Kafka wire protocol port | Standard Kafka port (`0` to disable Kafka) |
 | `--redis-port` | `6379` | Redis Streams RESP port | Standard Redis port (`0` to disable Redis) |
+| `--http-port` | `0` (Disabled) | HTTP REST ingress & SSE stream bridge port | Set to `8080` for browser/web client connectivity |
+| `--dlq-webhook-url` | `""` (Disabled) | Target URL for Dead-Letter Queue event notifications | HTTP POST destination with auto-retries for `.dlq` records |
 | `--data-dir` | `""` (Empty) | Directory for WAL disk persistence | Set to `./data` to retain messages across reboots |
 | `--headless` | `false` | Run as background daemon | Use in CI/CD, scripts, and Docker containers |
 | `--demo` | `false` | Emit continuous realistic traffic | Perfect for UI demos, onboarding, and testing |

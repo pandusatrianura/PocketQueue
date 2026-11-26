@@ -1,7 +1,7 @@
 class Pocketqueue < Formula
   desc "Ultra-lightweight embedded message broker supporting Kafka & Redis wire protocols"
   homepage "https://github.com/pandusatrianura/pocketqueue"
-  version "0.6.0"
+  version "0.7.0"
   license "MIT"
 
   on_macos do
