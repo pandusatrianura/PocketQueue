@@ -91,23 +91,26 @@ func TestFileOffsetStore_DebouncedFlush(t *testing.T) {
 		_ = store.Save(data)
 	}
 
-	// Wait for 80ms (> 50ms debounce threshold)
-	time.Sleep(80 * time.Millisecond)
-
-	// Open read-only check
-	storeCheck, err := broker.NewFileOffsetStore(tmpDir)
-	if err != nil {
-		t.Fatalf("failed to open storeCheck: %v", err)
+	// Wait for debounced flush to complete on disk (>50ms debounce threshold, up to 2s timeout)
+	deadline := time.Now().Add(2 * time.Second)
+	var lastOffset int64
+	for time.Now().Before(deadline) {
+		storeCheck, err := broker.NewFileOffsetStore(tmpDir)
+		if err == nil {
+			loaded, err := storeCheck.Load()
+			_ = storeCheck.Close()
+			if err == nil && loaded != nil && loaded["grp"] != nil && loaded["grp"]["topic"] != nil {
+				lastOffset = loaded["grp"]["topic"][0]
+				if lastOffset == 5 {
+					break
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	defer storeCheck.Close()
 
-	loaded, err := storeCheck.Load()
-	if err != nil {
-		t.Fatalf("failed to load from storeCheck: %v", err)
-	}
-
-	if loaded["grp"]["topic"][0] != 5 {
-		t.Errorf("expected offset 5 after debounce flush, got: %d", loaded["grp"]["topic"][0])
+	if lastOffset != 5 {
+		t.Errorf("expected offset 5 after debounce flush, got: %d", lastOffset)
 	}
 }
 

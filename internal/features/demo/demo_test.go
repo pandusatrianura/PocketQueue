@@ -21,10 +21,18 @@ func TestDemoGenerator(t *testing.T) {
 
 	gen := demo.NewGenerator(svc)
 
-	// Run generator for 100ms at fast interval (10ms)
+	// Run generator for up to 2 seconds or until topics are created
 	go gen.Start(ctx, 10*time.Millisecond)
 
-	time.Sleep(80 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	var topics map[string]int32
+	for time.Now().Before(deadline) {
+		topics, _ = svc.ListTopics(context.Background())
+		if len(topics) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	cancel()
 
 	// Verify topics exist and have messages
@@ -32,7 +40,6 @@ func TestDemoGenerator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to list topics: %v", err)
 	}
-
 	if len(topics) == 0 {
 		t.Error("expected demo generator to populate topics, found 0")
 	}

@@ -37,6 +37,7 @@ type FileOffsetStore struct {
 	flushTimer   *time.Timer
 	flushPending bool
 	closed       bool
+	lastErr      error
 }
 
 // NewFileOffsetStore creates a FileOffsetStore for the given directory.
@@ -100,7 +101,9 @@ func (f *FileOffsetStore) Save(offsets map[string]map[string]map[int32]int64) er
 			defer f.mu.Unlock()
 			f.flushPending = false
 			if f.dirty && !f.closed {
-				_ = f.flushLocked()
+				if err := f.flushLocked(); err != nil {
+					f.lastErr = err
+				}
 			}
 		})
 	}
@@ -126,7 +129,7 @@ func (f *FileOffsetStore) Close() error {
 	if f.dirty {
 		return f.flushLocked()
 	}
-	return nil
+	return f.lastErr
 }
 
 func (f *FileOffsetStore) flushLocked() error {
