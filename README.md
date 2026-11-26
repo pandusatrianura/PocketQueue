@@ -27,7 +27,7 @@ Running Kafka, Zookeeper, or RabbitMQ on local dev machines consumes **1.5–3 G
 - **Sub-8 MB RAM Footprint**: Run it in the background or right in your terminal with zero memory guilt.
 - **Microsecond Cold Start (< 3 ms)**: Ready to accept connections almost instantaneously.
 - **Drop-in Wire Compatibility**: Works with standard Kafka SDKs (port `9092`) and Redis Streams clients (port `6379`) without modifying your business code.
-- **Interactive Terminal UI (TUI)**: Real-time event streaming, syntax-highlighted JSON inspector, and inline **Dead-Letter Queue (DLQ) Replay Studio** powered by Charm `bubbletea`.
+- **Interactive Terminal UI (TUI) & Embedded Web Dashboard**: Real-time event streaming, syntax-highlighted JSON inspector, and inline **Dead-Letter Queue (DLQ) Replay Studio** powered by Charm `bubbletea`, plus a zero-dependency embedded Web UI at `http://localhost:8080`.
 - **Flexible Durability**: Runs in pure memory by default (zero disk cruft) or with persistent append-only Write-Ahead Logs via `--data-dir`.
 
 ---
@@ -40,7 +40,7 @@ Running Kafka, Zookeeper, or RabbitMQ on local dev machines consumes **1.5–3 G
 | **Startup Latency** | 30 – 60 seconds | 5 – 10 seconds | 10 – 20 seconds | **~2 milliseconds** 🚀 |
 | **Binary / Image Size** | > 800 MB (JVM + Image) | > 250 MB | > 300 MB | **< 5 MB** (Single Binary) |
 | **External Dependencies** | Docker, JVM, KRaft | Docker, C++ runtimes | Docker, Erlang VM | **None** (Pure Go) |
-| **Built-in TUI & Inspector** | ❌ (Requires AKHQ/Kafka UI) | ❌ (Requires Redpanda Console) | ❌ (Web UI only) | **✅ Native TUI (Charm)** |
+| **Built-in TUI & Inspector** | ❌ (Requires AKHQ/Kafka UI) | ❌ (Requires Redpanda Console) | ❌ (Web UI only) | **✅ Native TUI & Web UI** |
 | **In-Terminal DLQ Replay** | ❌ | ❌ | ❌ | **✅ Built-in (`r`/`e`)** |
 | **Dual Wire Protocol** | Kafka only | Kafka only | AMQP / MQTT | **✅ Kafka + Redis Streams** |
 
@@ -171,6 +171,22 @@ Automatically forward dead-letter messages to an external incident response or n
 ```
 When any message fails processing and is routed to a `.dlq` topic, PocketQueue's non-blocking background dispatcher sends an HTTP POST with custom headers (`x-dlq-original-topic`, `x-dlq-reason`) and up to 2 retries without stalling broker throughput.
 
+### Workflow 7: Zero-Dependency Embedded Web Dashboard
+Launch PocketQueue with `--http-port 8080` to access the built-in Web Studio directly in your browser (`http://localhost:8080` or `http://localhost:8080/ui`):
+
+```bash
+# Start PocketQueue with Web Dashboard & realistic demo traffic
+./bin/pocketqueue --http-port 8080 --demo
+```
+
+#### Web Dashboard Highlights:
+- ⚡ **Live Event Stream**: Real-time cross-topic event ingestion via Server-Sent Events (`/api/v1/topics/_all/sse`), live text search, topic dropdown filter, auto-scroll pause/freeze, and click-to-inspect JSON payload modal.
+- 📈 **Native HTML5 Canvas 2D Throughput Sparkline**: Moving message throughput chart (events/sec over a sliding 30-second window) calculated and rendered natively with zero external chart libraries.
+- 📊 **Topics & Watermarks Directory**: Real-time partition counts, earliest and latest high-watermark offsets, and system telemetry (uptime, memory allocation, active goroutines).
+- 📤 **Web Message Publisher**: Built-in visual publisher to send JSON or plain text payloads directly into any topic and partition with custom headers without opening cURL or an external terminal.
+- 🚨 **Dead-Letter Queue (DLQ) Studio & 1-Click Replay**: Dedicated triage dashboard for `.dlq` topics. Inspect poison pill failure reasons, edit/repair the payload in a modal, and re-inject the corrected event directly into the target topic via `POST /api/v1/dlq/replay`.
+- 🔒 **Air-Gapped & Zero-Dependency**: Embedded directly into the single executable via Go `embed.FS` (total asset bundle $< 31\text{ KB}$ uncompressed, PicoCSS v2 subset, vanilla JS, SVG icons). Zero external CDN or Node.js runtime required; works 100% offline.
+
 ---
 
 ## 🔌 Verified Client SDK Compatibility
@@ -234,7 +250,7 @@ PocketQueue requires zero configuration by default, but provides fine-grained co
 | `--host` | `127.0.0.1` | Binding network host | Use `127.0.0.1` for local safety; use `0.0.0.0` inside Docker or LAN |
 | `--port` | `9092` | Kafka wire protocol port | Standard Kafka port (`0` to disable Kafka) |
 | `--redis-port` | `6379` | Redis Streams RESP port | Standard Redis port (`0` to disable Redis) |
-| `--http-port` | `0` (Disabled) | HTTP REST ingress & SSE stream bridge port | Set to `8080` for browser/web client connectivity |
+| `--http-port` | `0` (Disabled) | HTTP REST ingress, SSE bridge, and embedded Web Dashboard port | Set to `8080` to open Web UI at `http://localhost:8080` |
 | `--dlq-webhook-url` | `""` (Disabled) | Target URL for Dead-Letter Queue event notifications | HTTP POST destination with auto-retries for `.dlq` records |
 | `--data-dir` | `""` (Empty) | Directory for WAL disk persistence | Set to `./data` to retain messages across reboots |
 | `--headless` | `false` | Run as background daemon | Use in CI/CD, scripts, and Docker containers |

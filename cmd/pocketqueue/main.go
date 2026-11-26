@@ -251,7 +251,7 @@ func main() {
 			endpoints += fmt.Sprintf("Redis:%s ", redisServer.Addr())
 		}
 		if httpServer != nil {
-			endpoints += fmt.Sprintf("HTTP:%s ", httpServer.Addr())
+			endpoints += fmt.Sprintf("HTTP:%s (UI: http://%s) ", httpServer.Addr(), httpServer.Addr())
 		}
 		if dlqDispatcher != nil {
 			endpoints += fmt.Sprintf("DLQ-Webhook:%s ", cfg.DLQWebhookURL)

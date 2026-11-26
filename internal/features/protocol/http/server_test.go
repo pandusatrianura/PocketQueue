@@ -3,6 +3,7 @@ package http_test
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -270,5 +271,376 @@ func TestHTTP_Produce_InvalidJSONSyntax(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 BadRequest for malformed JSON, got: %d", resp.StatusCode)
+	}
+}
+
+func TestAPI_ListTopics(t *testing.T) {
+	svc, server := setupTestServer(t)
+	defer svc.Close()
+	defer server.Close()
+
+	// Seed 2 topics
+	_, err := svc.Produce(context.Background(), "telemetry", 0, []byte("dev-1"), []byte("{\"temp\":22}"), nil)
+	if err != nil {
+		t.Fatalf("failed to produce to telemetry: %v", err)
+	}
+	_, err = svc.Produce(context.Background(), "alerts", 0, []byte("crit"), []byte("{\"level\":\"high\"}"), nil)
+	if err != nil {
+		t.Fatalf("failed to produce to alerts: %v", err)
+	}
+
+	resp, err := http.Get(server.URL() + "/api/v1/topics")
+	if err != nil {
+		t.Fatalf("GET /api/v1/topics failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 OK, got: %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Topics []struct {
+			Name          string `json:"name"`
+			Partitions    int32  `json:"partitions"`
+			TotalMessages int64  `json:"total_messages"`
+		} `json:"topics"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode JSON response: %v", err)
+	}
+
+	if len(result.Topics) != 2 {
+		t.Fatalf("expected 2 topics, got %d", len(result.Topics))
+	}
+
+	foundTelemetry := false
+	for _, top := range result.Topics {
+		if top.Name == "telemetry" {
+			foundTelemetry = true
+			if top.TotalMessages != 1 {
+				t.Errorf("expected 1 message in telemetry, got %d", top.TotalMessages)
+			}
+		}
+	}
+	if !foundTelemetry {
+		t.Errorf("expected telemetry topic in response")
+	}
+}
+
+func TestAPI_BrokerStats(t *testing.T) {
+	svc, server := setupTestServer(t)
+	defer svc.Close()
+	defer server.Close()
+
+	// Produce 1 message
+	_, _ = svc.Produce(context.Background(), "stats-topic", 0, []byte("k"), []byte("v"), nil)
+
+	resp, err := http.Get(server.URL() + "/api/v1/stats")
+	if err != nil {
+		t.Fatalf("GET /api/v1/stats failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 OK, got: %d", resp.StatusCode)
+	}
+
+	var stats map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		t.Fatalf("failed to decode JSON stats: %v", err)
+	}
+
+	if stats["status"] != "UP" {
+		t.Errorf("expected status 'UP', got %v", stats["status"])
+	}
+	if uptime, ok := stats["uptime_seconds"].(float64); !ok || uptime < 0 {
+		t.Errorf("invalid uptime_seconds: %v", stats["uptime_seconds"])
+	}
+	if total, ok := stats["total_messages"].(float64); !ok || total < 1 {
+		t.Errorf("expected total_messages >= 1, got %v", stats["total_messages"])
+	}
+}
+
+func TestAPI_DLQReplay(t *testing.T) {
+	svc, server := setupTestServer(t)
+	defer svc.Close()
+	defer server.Close()
+
+	// 1. Send poison message to orders.dlq
+	_, err := svc.SendToDLQ(context.Background(), "orders", 0, []byte("ord-bad"), []byte(`{"order_id": 999, "status": "malformed"}`), nil, "deserialization failed")
+	if err != nil {
+		t.Fatalf("failed to send to DLQ: %v", err)
+	}
+
+	// 2. Call POST /api/v1/dlq/replay with repaired payload
+	replayReq := map[string]any{
+		"dlq_topic":    "orders.dlq",
+		"target_topic": "orders",
+		"key":          "ord-bad",
+		"value": map[string]any{
+			"order_id": 999,
+			"status":   "repaired",
+		},
+		"partition": 0,
+		"headers": map[string]string{
+			"repaired_by": "web-console",
+		},
+	}
+	rawJSON, _ := json.Marshal(replayReq)
+
+	resp, err := http.Post(server.URL()+"/api/v1/dlq/replay", "application/json", bytes.NewReader(rawJSON))
+	if err != nil {
+		t.Fatalf("POST /api/v1/dlq/replay failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 OK, got %d: %s", resp.StatusCode, string(body))
+	}
+
+	var res struct {
+		Status      string `json:"status"`
+		SourceTopic string `json:"source_topic"`
+		TargetTopic string `json:"target_topic"`
+		Offset      int64  `json:"offset"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if res.Status != "replayed" || res.TargetTopic != "orders" {
+		t.Errorf("unexpected replay response: %+v", res)
+	}
+
+	// 3. Verify message is now present in destination 'orders' topic
+	records, err := svc.Fetch(context.Background(), "orders", 0, 0, 10)
+	if err != nil {
+		t.Fatalf("fetch orders failed: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record in orders, got %d", len(records))
+	}
+	if string(records[0].Key) != "ord-bad" {
+		t.Errorf("expected key 'ord-bad', got %s", string(records[0].Key))
+	}
+	if !strings.Contains(string(records[0].Value), "repaired") {
+		t.Errorf("expected value to contain 'repaired', got: %s", string(records[0].Value))
+	}
+}
+
+func TestAPI_DLQReplay_Validation(t *testing.T) {
+	svc, server := setupTestServer(t)
+	defer svc.Close()
+	defer server.Close()
+
+	// Missing dlq_topic and target_topic
+	badReq := map[string]any{
+		"value": "some-val",
+	}
+	rawJSON, _ := json.Marshal(badReq)
+
+	resp, err := http.Post(server.URL()+"/api/v1/dlq/replay", "application/json", bytes.NewReader(rawJSON))
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request, got: %d", resp.StatusCode)
+	}
+}
+
+func TestUI_ServeIndexHTML(t *testing.T) {
+	svc, server := setupTestServer(t)
+	defer svc.Close()
+	defer server.Close()
+
+	for _, path := range []string{"/", "/ui"} {
+		resp, err := http.Get(server.URL() + path)
+		if err != nil {
+			t.Fatalf("GET %s failed: %v", path, err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected 200 OK for %s, got: %d", path, resp.StatusCode)
+		}
+		contentType := resp.Header.Get("Content-Type")
+		if !strings.Contains(contentType, "text/html") {
+			t.Errorf("expected Content-Type text/html for %s, got: %s", path, contentType)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "PocketQueue") {
+			t.Errorf("expected 'PocketQueue' in HTML body for %s", path)
+		}
+	}
+}
+
+func TestUI_ServeStaticAssets(t *testing.T) {
+	svc, server := setupTestServer(t)
+	defer svc.Close()
+	defer server.Close()
+
+	cases := []struct {
+		path        string
+		expectedCode int
+		expectedType string
+	}{
+		{"/static/pico.min.css", http.StatusOK, "text/css"},
+		{"/static/app.css", http.StatusOK, "text/css"},
+		{"/static/app.js", http.StatusOK, "application/javascript"},
+		{"/static/favicon.svg", http.StatusOK, "image/svg+xml"},
+		{"/static/unknown.xyz", http.StatusNotFound, ""},
+	}
+
+	for _, tc := range cases {
+		resp, err := http.Get(server.URL() + tc.path)
+		if err != nil {
+			t.Fatalf("GET %s failed: %v", tc.path, err)
+		}
+		resp.Body.Close()
+
+		if resp.StatusCode != tc.expectedCode {
+			t.Errorf("expected %d for %s, got: %d", tc.expectedCode, tc.path, resp.StatusCode)
+		}
+		if tc.expectedType != "" && !strings.Contains(resp.Header.Get("Content-Type"), tc.expectedType) {
+			t.Errorf("expected Content-Type %s for %s, got: %s", tc.expectedType, tc.path, resp.Header.Get("Content-Type"))
+		}
+	}
+}
+
+func TestUI_Caching_ETag(t *testing.T) {
+	svc, server := setupTestServer(t)
+	defer svc.Close()
+	defer server.Close()
+
+	// 1. Initial request to obtain ETag
+	resp, err := http.Get(server.URL() + "/static/app.css")
+	if err != nil {
+		t.Fatalf("initial GET failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got: %d", resp.StatusCode)
+	}
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		t.Fatalf("expected non-empty ETag header")
+	}
+
+	// 2. Conditional request with matching If-None-Match
+	req, err := http.NewRequest(http.MethodGet, server.URL()+"/static/app.css", nil)
+	if err != nil {
+		t.Fatalf("new request failed: %v", err)
+	}
+	req.Header.Set("If-None-Match", etag)
+
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("conditional GET failed: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusNotModified {
+		t.Errorf("expected 304 Not Modified, got: %d", resp2.StatusCode)
+	}
+}
+
+func TestUI_GzipCompression(t *testing.T) {
+	svc, server := setupTestServer(t)
+	defer svc.Close()
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL()+"/", nil)
+	if err != nil {
+		t.Fatalf("new request failed: %v", err)
+	}
+	req.Header.Set("Accept-Encoding", "gzip")
+
+	// Use transport that does NOT automatically decompress so we can inspect Content-Encoding
+	tr := &http.Transport{DisableCompression: true}
+	client := &http.Client{Transport: tr}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("GET with gzip failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got: %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Content-Encoding") != "gzip" {
+		t.Errorf("expected Content-Encoding gzip, got: %s", resp.Header.Get("Content-Encoding"))
+	}
+
+	gzReader, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		t.Fatalf("gzip.NewReader failed: %v", err)
+	}
+	defer gzReader.Close()
+
+	decompressed, err := io.ReadAll(gzReader)
+	if err != nil {
+		t.Fatalf("read decompressed failed: %v", err)
+	}
+
+	if !strings.Contains(string(decompressed), "PocketQueue") {
+		t.Errorf("expected 'PocketQueue' in decompressed content")
+	}
+}
+
+func TestHTTP_SSEStream_Wildcard(t *testing.T) {
+	svc, server := setupTestServer(t)
+	defer svc.Close()
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL()+"/api/v1/topics/_all/sse", nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("connect SSE stream: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got: %d", resp.StatusCode)
+	}
+
+	// Produce messages to 2 different topics
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_, _ = svc.Produce(context.Background(), "topic-a", 0, []byte("k1"), []byte("payload A"), nil)
+		time.Sleep(20 * time.Millisecond)
+		_, _ = svc.Produce(context.Background(), "topic-b", 0, []byte("k2"), []byte("payload B"), nil)
+	}()
+
+	scanner := bufio.NewScanner(resp.Body)
+	var foundA, foundB bool
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, "payload A") {
+			foundA = true
+		}
+		if strings.Contains(line, "payload B") {
+			foundB = true
+		}
+		if foundA && foundB {
+			break
+		}
+	}
+
+	if !foundA || !foundB {
+		t.Fatalf("expected both topic-a and topic-b in wildcard SSE stream, got foundA=%v, foundB=%v", foundA, foundB)
 	}
 }

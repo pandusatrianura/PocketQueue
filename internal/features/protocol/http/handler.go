@@ -32,9 +32,10 @@ type ProduceResponse struct {
 
 // Handler routes HTTP ingress requests to the broker service.
 type Handler struct {
-	broker   *broker.Service
-	eventBus *broker.EventBus
-	logger   *slog.Logger
+	broker    *broker.Service
+	eventBus  *broker.EventBus
+	logger    *slog.Logger
+	startTime time.Time
 }
 
 // NewHandler instantiates an HTTP Handler.
@@ -43,16 +44,23 @@ func NewHandler(svc *broker.Service, bus *broker.EventBus, logger *slog.Logger) 
 		logger = slog.Default()
 	}
 	return &Handler{
-		broker:   svc,
-		eventBus: bus,
-		logger:   logger,
+		broker:    svc,
+		eventBus:  bus,
+		logger:    logger,
+		startTime: time.Now().UTC(),
 	}
 }
 
-// RegisterRoutes binds HTTP REST and SSE endpoints to the given mux.
+// RegisterRoutes binds HTTP REST, SSE, and Web UI endpoints to the given mux.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /healthz", h.handleHealthz)
 	mux.HandleFunc("OPTIONS /", h.handleCORS)
+	mux.HandleFunc("GET /{$}", h.handleServeUI)
+	mux.HandleFunc("GET /ui", h.handleServeUI)
+	mux.HandleFunc("GET /static/{file}", h.handleServeStatic)
+	mux.HandleFunc("GET /api/v1/topics", h.handleListTopics)
+	mux.HandleFunc("GET /api/v1/stats", h.handleBrokerStats)
+	mux.HandleFunc("POST /api/v1/dlq/replay", h.handleDLQReplay)
 	mux.HandleFunc("POST /api/v1/topics/{topic}", h.handleProduce)
 	mux.HandleFunc("GET /api/v1/topics/{topic}/sse", h.handleSSEStream)
 }
@@ -209,7 +217,7 @@ func (h *Handler) handleSSEStream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			if rec.Topic == topic {
+			if topic == "*" || topic == "_all" || rec.Topic == topic {
 				payload, err := json.Marshal(map[string]any{
 					"topic":     rec.Topic,
 					"partition": rec.Partition,

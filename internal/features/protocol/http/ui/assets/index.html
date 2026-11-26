@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PocketQueue Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/pico.min.css">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header>
+    <div class="navbar">
+      <a href="/" class="brand">
+        <svg viewBox="0 0 24 24" fill="#f59e0b" stroke="#d97706" stroke-width="1.5">
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+        </svg>
+        <span>PocketQueue</span>
+        <span class="badge badge-muted" id="badge-version">v0.8.0</span>
+      </a>
+      <div class="nav-actions">
+        <span class="badge badge-success" id="connection-status">● Live SSE</span>
+        <button class="secondary sm" id="theme-toggle" title="Toggle theme">🌓</button>
+      </div>
+    </div>
+
+    <!-- Navigation Tabs -->
+    <nav class="tabs-nav">
+      <button class="tab-btn active" data-tab="tab-stream">⚡ Live Stream</button>
+      <button class="tab-btn" data-tab="tab-topics">📊 Topics & Watermarks</button>
+      <button class="tab-btn" data-tab="tab-producer">📤 Web Publisher</button>
+      <button class="tab-btn" data-tab="tab-dlq">🚨 DLQ Studio</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Tab 1: Live Event Stream -->
+    <section id="tab-stream" class="tab-content active">
+      <div class="stream-bar">
+        <div class="stream-filters">
+          <select id="filter-topic" class="sm" style="max-width: 180px;">
+            <option value="">All Topics</option>
+          </select>
+          <input type="search" id="filter-search" class="sm" placeholder="Filter payload or key..." style="max-width: 240px;">
+          <button id="btn-pause" class="secondary sm">⏸ Pause</button>
+          <button id="btn-clear" class="secondary sm">🧹 Clear</button>
+        </div>
+        <div class="sparkline-box">
+          <span style="font-size: 0.8rem; color: var(--pico-muted);" id="rate-counter">0 msg/s</span>
+          <canvas id="sparkline" width="140" height="32"></canvas>
+        </div>
+      </div>
+
+      <div class="table-container">
+        <table class="stream-table">
+          <thead>
+            <tr>
+              <th style="width: 130px;">Time</th>
+              <th style="width: 180px;">Topic</th>
+              <th style="width: 80px;">Part</th>
+              <th style="width: 90px;">Offset</th>
+              <th style="width: 130px;">Key</th>
+              <th>Payload</th>
+              <th style="width: 70px;">Action</th>
+            </tr>
+          </thead>
+          <tbody id="stream-tbody">
+            <tr>
+              <td colspan="7" style="text-align: center; color: var(--pico-muted); padding: 2rem;">
+                Listening for real-time events on SSE bridge...
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Tab 2: Topics & Watermarks -->
+    <section id="tab-topics" class="tab-content">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <h3>Registered Topics & Partitions</h3>
+        <button id="btn-refresh-topics" class="secondary sm">🔄 Refresh</button>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Topic Name</th>
+              <th>Partitions</th>
+              <th>Total Messages</th>
+              <th>Watermarks (Earliest → Latest)</th>
+            </tr>
+          </thead>
+          <tbody id="topics-tbody">
+            <tr><td colspan="4" style="text-align: center;">Loading topic metadata...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Tab 3: Web Message Publisher -->
+    <section id="tab-producer" class="tab-content">
+      <div class="card" style="max-width: 700px; margin: 0 auto;">
+        <h3>Publish Message to Topic</h3>
+        <p style="color: var(--pico-muted); font-size: 0.9rem;">Send events directly into PocketQueue broker without writing code.</p>
+        <form id="form-publish">
+          <div class="grid">
+            <div class="form-group">
+              <label for="pub-topic">Topic Name *</label>
+              <input type="text" id="pub-topic" required placeholder="e.g. orders">
+            </div>
+            <div class="form-group">
+              <label for="pub-partition">Partition</label>
+              <input type="number" id="pub-partition" value="0" min="0">
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="pub-key">Message Key (Optional)</label>
+            <input type="text" id="pub-key" placeholder="e.g. ord-101">
+          </div>
+          <div class="form-group">
+            <label for="pub-value">Payload (JSON or Plain Text) *</label>
+            <textarea id="pub-value" rows="6" required placeholder='{"customer": "Alice", "total": 99.5}'></textarea>
+          </div>
+          <div class="form-group">
+            <label for="pub-headers">Headers (JSON key-value, optional)</label>
+            <input type="text" id="pub-headers" placeholder='{"source": "web-dashboard"}'>
+          </div>
+          <button type="submit" id="btn-publish-submit">Publish Message</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- Tab 4: Dead-Letter Queue (DLQ) Studio -->
+    <section id="tab-dlq" class="tab-content">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <div>
+          <h3>Dead-Letter Queue (DLQ) Triage</h3>
+          <p style="color: var(--pico-muted); font-size: 0.9rem;">Inspect and repair poison pill messages routed to <code>*.dlq</code> topics.</p>
+        </div>
+        <button id="btn-refresh-dlq" class="secondary sm">🔄 Refresh</button>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>DLQ Topic</th>
+              <th>Offset</th>
+              <th>Original Topic</th>
+              <th>Reason</th>
+              <th>Payload Preview</th>
+              <th style="width: 140px;">Action</th>
+            </tr>
+          </thead>
+          <tbody id="dlq-tbody">
+            <tr><td colspan="6" style="text-align: center; color: var(--pico-muted); padding: 1.5rem;">No DLQ records found.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- Modal: Inspect Payload -->
+  <div id="modal-inspect" class="modal">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h4>Inspect Message</h4>
+        <button class="secondary sm modal-close">&times;</button>
+      </div>
+      <div id="modal-inspect-body">
+        <pre><code id="inspect-code"></code></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Replay DLQ -->
+  <div id="modal-replay" class="modal">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h4>Replay Dead-Letter Message</h4>
+        <button class="secondary sm modal-close">&times;</button>
+      </div>
+      <form id="form-replay">
+        <input type="hidden" id="replay-dlq-topic">
+        <div class="form-group">
+          <label for="replay-target-topic">Destination Topic *</label>
+          <input type="text" id="replay-target-topic" required>
+        </div>
+        <div class="form-group">
+          <label for="replay-key">Message Key</label>
+          <input type="text" id="replay-key">
+        </div>
+        <div class="form-group">
+          <label for="replay-value">Repaired Payload (JSON) *</label>
+          <textarea id="replay-value" rows="6" required></textarea>
+        </div>
+        <button type="submit" class="danger">Replay to Topic</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
