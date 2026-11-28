@@ -1,7 +1,7 @@
 # ⚡ PocketQueue
 
 > **The SQLite of Message Brokers.**  
-> Ultra-lightweight (<5 MB single binary, <8 MB RAM), zero-dependency local message broker with an interactive Terminal UI (TUI), speaking drop-in **Kafka Wire Protocol** (`:9092`) and **Redis Streams RESP** (`:6379`).
+> Ultra-lightweight (<5 MB single binary, <8 MB RAM), zero-dependency local message broker with an interactive Terminal UI (TUI), speaking drop-in **Kafka Wire Protocol** (`:9092`), **Redis Streams RESP** (`:6379`), and **MQTT v3.1.1** (`:1883`).
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/pandusatrianura/pocketqueue)](https://goreportcard.com/report/github.com/pandusatrianura/pocketqueue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -26,7 +26,7 @@ Running Kafka, Zookeeper, or RabbitMQ on local dev machines consumes **1.5–3 G
 - **Single executable binary (< 5 MB)**: No JVM, no Docker, no Erlang runtime, zero external dependencies (`CGO_ENABLED=0`).
 - **Sub-8 MB RAM Footprint**: Run it in the background or right in your terminal with zero memory guilt.
 - **Microsecond Cold Start (< 3 ms)**: Ready to accept connections almost instantaneously.
-- **Drop-in Wire Compatibility**: Works with standard Kafka SDKs (port `9092`) and Redis Streams clients (port `6379`) without modifying your business code.
+- **Drop-in Wire Compatibility**: Works with standard Kafka SDKs (port `9092`), Redis Streams clients (port `6379`), and MQTT v3.1.1 IoT devices (port `1883`) without modifying your business code.
 - **Interactive Terminal UI (TUI) & Embedded Web Dashboard**: Real-time event streaming, syntax-highlighted JSON inspector, and inline **Dead-Letter Queue (DLQ) Replay Studio** powered by Charm `bubbletea`, plus a zero-dependency embedded Web UI at `http://localhost:8080`.
 - **Dynamic Protobuf & Schema Decoder**: Automatic detection of Confluent Wire Format (magic byte `0x00` + Schema ID) and raw Protobuf payloads via `--proto-desc`, with structured JSON reflection and aligned 16-byte Hex Dump fallback.
 - **Flexible Durability**: Runs in pure memory by default (zero disk cruft) or with persistent append-only Write-Ahead Logs via `--data-dir`.
@@ -43,7 +43,7 @@ Running Kafka, Zookeeper, or RabbitMQ on local dev machines consumes **1.5–3 G
 | **External Dependencies** | Docker, JVM, KRaft | Docker, C++ runtimes | Docker, Erlang VM | **None** (Pure Go) |
 | **Built-in TUI & Inspector** | ❌ (Requires AKHQ/Kafka UI) | ❌ (Requires Redpanda Console) | ❌ (Web UI only) | **✅ Native TUI & Web UI** |
 | **In-Terminal DLQ Replay** | ❌ | ❌ | ❌ | **✅ Built-in (`r`/`e`)** |
-| **Dual Wire Protocol** | Kafka only | Kafka only | AMQP / MQTT | **✅ Kafka + Redis Streams** |
+| **Triple Wire Protocol** | Kafka only | Kafka only | AMQP / MQTT | **✅ Kafka + Redis + MQTT** |
 
 ---
 
@@ -206,6 +206,24 @@ protoc --descriptor_set_out=schemas.desc --include_imports order.proto user.prot
 ./bin/pocketqueue --proto-desc schemas.desc --http-port 8080
 ```
 
+### Workflow 9: MQTT v3.1.1 IoT Protocol Ingress Bridge
+In Internet of Things (IoT), robotics, and embedded development, hardware devices (ESP32, Raspberry Pi, Arduino, sensors) send telemetry using lightweight MQTT control packets rather than heavy HTTP or Kafka connections.
+
+PocketQueue natively listens on port `1883` (`--mqtt-port 1883`) as a drop-in MQTT v3.1.1 broker with **bi-directional cross-protocol bridging**:
+- **IoT Ingress**: An edge sensor publishes telemetry via MQTT $\to$ instantly accessible by Kafka microservices (`:9092`), Redis Streams (`:6379`), and the Web Dashboard SSE stream (`:8080`).
+- **IoT Egress**: Microservices producing to Kafka or Redis topics $\to$ automatically fanned out in real-time to MQTT devices subscribed to matching topics or wildcards (`+` and `#`).
+- **Zero Configuration**: Built-in support for QoS 0, QoS 1 (`PUBACK`), `PINGREQ` keepalive, and graceful clean sessions.
+
+```bash
+# 1. Publish sensor data from an edge device or terminal:
+mosquitto_pub -h 127.0.0.1 -p 1883 -t "factory/chiller1/temp" -m '{"temp_c": 18.4, "status": "nominal"}'
+
+# 2. Subscribe to all factory sensors using MQTT multi-level wildcard:
+mosquitto_sub -h 127.0.0.1 -p 1883 -t "factory/#" -v
+
+# 3. Or consume the exact same sensor stream using Kafka or the Web Dashboard!
+```
+
 ---
 
 ## 🔌 Verified Client SDK Compatibility
@@ -220,6 +238,9 @@ PocketQueue is continuously tested against official production client libraries 
 | **Python** | Standard Library Socket | Kafka `:9092` | `ApiVersions`, `Metadata`, `CreateTopics` (API 19), `DeleteTopics` (API 20) | ✅ Verified |
 | **Node.js** | [`ioredis`](https://github.com/redis/ioredis) | Redis Streams `:6379` | `xadd`, `xlen`, `xrange`, `xgroup`, `xreadgroup`, `xack`, `xrevrange`, `xdel` | ✅ Verified |
 | **Node.js** | Standard `net` Socket | Kafka `:9092` | `ApiVersions`, `Metadata`, `CreateTopics` (API 19), `DeleteTopics` (API 20) | ✅ Verified |
+| **CLI / IoT** | [`mosquitto_pub` / `_sub`](https://mosquitto.org/) | MQTT `:1883` | `CONNECT`, `PUBLISH` (QoS 0/1), `SUBSCRIBE` (wildcards `+`, `#`), `PINGREQ` | ✅ Verified |
+| **Python** | [`paho-mqtt`](https://pypi.org/project/paho-mqtt/) | MQTT `:1883` | Client connect, keepalive ping, QoS 0/1 publish, subscribe | ✅ Verified |
+| **Node.js** | [`mqtt.js`](https://github.com/mqttjs/MQTT.js) | MQTT `:1883` | Client connect, QoS 0/1 publish, wildcard subscribe | ✅ Verified |
 
 #### Go Example: Producing & Consuming with `IBM/sarama`
 ```go
@@ -269,6 +290,7 @@ PocketQueue requires zero configuration by default, but provides fine-grained co
 | `--host` | `127.0.0.1` | Binding network host | Use `127.0.0.1` for local safety; use `0.0.0.0` inside Docker or LAN |
 | `--port` | `9092` | Kafka wire protocol port | Standard Kafka port (`0` to disable Kafka) |
 | `--redis-port` | `6379` | Redis Streams RESP port | Standard Redis port (`0` to disable Redis) |
+| `--mqtt-port` | `1883` | MQTT v3.1.1 protocol port | Standard MQTT port (`0` to disable MQTT) |
 | `--http-port` | `0` (Disabled) | HTTP REST ingress, SSE bridge, and embedded Web Dashboard port | Set to `8080` to open Web UI at `http://localhost:8080` |
 | `--proto-desc` | `""` (Disabled) | Path to compiled Protobuf `FileDescriptorSet` (`.desc`) | Supply compiled `.desc` file to dynamically decode Protobuf payloads |
 | `--dlq-webhook-url` | `""` (Disabled) | Target URL for Dead-Letter Queue event notifications | HTTP POST destination with auto-retries for `.dlq` records |

@@ -34,6 +34,7 @@ func TestConfig_ChaosFields(t *testing.T) {
 		RetentionBytes:     50 * 1024 * 1024,
 		DrainTimeout:       500 * 1000 * 1000,
 		HTTPPort:           8080,
+		MQTTPort:            1883,
 		DLQWebhookURL:      "http://127.0.0.1:8080/dlq",
 		ProtoDescPath:      "./test/fixtures/schemas.desc",
 	}
@@ -50,6 +51,9 @@ func TestConfig_ChaosFields(t *testing.T) {
 	}
 	if cfg.HTTPPort != 8080 {
 		t.Errorf("unexpected HTTP port: %d", cfg.HTTPPort)
+	}
+	if cfg.MQTTPort != 1883 {
+		t.Errorf("unexpected MQTT port: %d", cfg.MQTTPort)
 	}
 	if cfg.DLQWebhookURL != "http://127.0.0.1:8080/dlq" {
 		t.Errorf("unexpected DLQ webhook URL: %s", cfg.DLQWebhookURL)

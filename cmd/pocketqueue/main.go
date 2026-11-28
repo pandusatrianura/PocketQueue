@@ -19,6 +19,7 @@ import (
 	"github.com/pandusatrianura/pocketqueue/internal/features/demo"
 	protocolhttp "github.com/pandusatrianura/pocketqueue/internal/features/protocol/http"
 	"github.com/pandusatrianura/pocketqueue/internal/features/protocol/kafka"
+	"github.com/pandusatrianura/pocketqueue/internal/features/protocol/mqtt"
 	"github.com/pandusatrianura/pocketqueue/internal/features/protocol/redis"
 	"github.com/pandusatrianura/pocketqueue/internal/features/storage"
 	"github.com/pandusatrianura/pocketqueue/internal/features/tui"
@@ -227,6 +228,18 @@ func main() {
 		defer httpServer.Close()
 	}
 
+	// 5. Start MQTT v3.1.1 Protocol Server (port 1883)
+	var mqttServer *mqtt.Server
+	if cfg.MQTTPort > 0 {
+		mqttAddr := fmt.Sprintf("%s:%d", cfg.Host, cfg.MQTTPort)
+		mqttServer = mqtt.NewServer(mqttAddr, brokerSvc, bus, nil)
+		if err := mqttServer.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error starting MQTT protocol server: %v\n", err)
+			os.Exit(1)
+		}
+		defer mqttServer.Close()
+	}
+
 	// 5. Start Webhook DLQ Dispatcher if configured
 	var dlqDispatcher *broker.WebhookDLQDispatcher
 	if cfg.DLQWebhookURL != "" {
@@ -265,6 +278,9 @@ func main() {
 		}
 		if redisServer != nil {
 			endpoints += fmt.Sprintf("Redis:%s ", redisServer.Addr())
+		}
+		if mqttServer != nil {
+			endpoints += fmt.Sprintf("MQTT:%s ", mqttServer.Addr())
 		}
 		if httpServer != nil {
 			endpoints += fmt.Sprintf("HTTP:%s (UI: http://%s) ", httpServer.Addr(), httpServer.Addr())
@@ -316,6 +332,13 @@ func main() {
 			go func() {
 				defer drainWg.Done()
 				_ = httpServer.CloseWithTimeout(cfg.DrainTimeout)
+			}()
+		}
+		if mqttServer != nil {
+			drainWg.Add(1)
+			go func() {
+				defer drainWg.Done()
+				_ = mqttServer.Close()
 			}()
 		}
 		if dlqDispatcher != nil {

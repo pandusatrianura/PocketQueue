@@ -12,6 +12,7 @@ type Config struct {
 	Port        int
 	RedisPort   int
 	HTTPPort    int
+	MQTTPort    int
 	DLQWebhookURL string
 	DataDir     string
 	Headless    bool
@@ -58,6 +59,7 @@ func parseFlags() *Config {
 	flag.IntVar(&kafkaPort, "kafka-port", 0, "Kafka wire protocol listening port (alias for -port)")
 	flag.IntVar(&cfg.RedisPort, "redis-port", 6379, "Redis Streams protocol listening port (0 to disable)")
 	flag.IntVar(&cfg.HTTPPort, "http-port", 0, "HTTP REST, SSE & Web Dashboard port (0 to disable)")
+	flag.IntVar(&cfg.MQTTPort, "mqtt-port", 1883, "MQTT v3.1.1 protocol listening port (0 to disable)")
 	flag.StringVar(&cfg.DLQWebhookURL, "dlq-webhook-url", "", "HTTP POST endpoint URL to forward Dead-Letter Queue (.dlq) messages")
 	flag.StringVar(&cfg.DataDir, "data-dir", "", "Directory for append-only WAL persistence (empty for pure in-memory)")
 	flag.BoolVar(&cfg.Headless, "headless", false, "Run in headless daemon mode (disable TUI)")
