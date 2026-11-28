@@ -28,7 +28,7 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Println("PocketQueue v0.9.0")
+		fmt.Println("PocketQueue v0.10.0")
 		os.Exit(0)
 	}
 

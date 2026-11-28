@@ -239,8 +239,8 @@ func TestWebDashboardE2E_FullLifecycle(t *testing.T) {
 	if statsData.Status != "UP" {
 		t.Errorf("stats status expected UP, got: %s", statsData.Status)
 	}
-	if statsData.Version != "0.9.0" {
-		t.Errorf("stats version expected 0.9.0, got: %s", statsData.Version)
+	if statsData.Version != "0.10.0" {
+		t.Errorf("stats version expected 0.10.0, got: %s", statsData.Version)
 	}
 	if statsData.TotalMessages < 1 {
 		t.Errorf("stats total_messages expected >= 1, got: %d", statsData.TotalMessages)

@@ -109,7 +109,7 @@ func (h *Handler) handleBrokerStats(w http.ResponseWriter, r *http.Request) {
 
 	stats := BrokerStatsResponse{
 		Status:        "UP",
-		Version:       "0.9.0",
+		Version:       "0.10.0",
 		UptimeSeconds: uptime,
 		TotalMessages: totalMsgs,
 		TopicsCount:   len(topicMap),
