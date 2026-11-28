@@ -5,9 +5,9 @@
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/pandusatrianura/pocketqueue)](https://goreportcard.com/report/github.com/pandusatrianura/pocketqueue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Binary Size](https://img.shields.io/badge/Binary%20Size-5.21%20MB-success)](scripts/audit.ps1)
-[![RAM Usage](https://img.shields.io/badge/Idle%20RAM-7.9%20MB-success)](scripts/audit.ps1)
-[![Boot Time](https://img.shields.io/badge/Cold%20Start-2.2%20ms-success)](scripts/audit.ps1)
+[![Binary Size](https://img.shields.io/badge/Binary%20Size-10.9%20MB-success)](scripts/audit.ps1)
+[![RAM Usage](https://img.shields.io/badge/Idle%20RAM-10.0%20MB-success)](scripts/audit.ps1)
+[![Boot Time](https://img.shields.io/badge/Cold%20Start-1.7%20ms-success)](scripts/audit.ps1)
 
 <p align="center">
   <img src="docs/assets/pocketqueue-demo.gif" alt="PocketQueue TUI & DLQ Replay Studio Demo" width="850">
@@ -62,9 +62,9 @@ scoop bucket add pocketqueue https://github.com/pandusatrianura/pocketqueue
 scoop install pocketqueue
 ```
 
-#### Docker (< 8 MB Ultra-Minimal Scratch Image):
+#### Docker (< 11 MB Ultra-Minimal Scratch Image):
 ```bash
-docker run -d -p 9092:9092 -p 6379:6379 ghcr.io/pandusatrianura/pocketqueue:latest
+docker run -d -p 9092:9092 -p 6379:6379 -p 1883:1883 -p 8080:8080 ghcr.io/pandusatrianura/pocketqueue:latest
 ```
 
 #### Docker Compose (Drop-In Microservices Replacement):
@@ -76,6 +76,8 @@ services:
     ports:
       - "9092:9092" # Kafka wire protocol
       - "6379:6379" # Redis Streams wire protocol
+      - "1883:1883" # MQTT v3.1.1 IoT bridge
+      - "8080:8080" # Web Dashboard & HTTP REST/SSE bridge
 ```
 
 #### Build from source:

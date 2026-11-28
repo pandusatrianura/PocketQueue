@@ -20,7 +20,7 @@ FROM scratch
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /pocketqueue /pocketqueue
 
-# Default wire ports: 9092 (Kafka), 6379 (Redis Streams)
-EXPOSE 9092 6379
+# Default wire ports: 9092 (Kafka), 6379 (Redis Streams), 1883 (MQTT), 8080 (Web Dashboard/HTTP)
+EXPOSE 9092 6379 1883 8080
 
 ENTRYPOINT ["/pocketqueue", "--headless", "--host", "0.0.0.0"]
