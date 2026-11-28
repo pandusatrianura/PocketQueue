@@ -579,6 +579,21 @@ PocketQueue enforces the **3-Tier Pre-Implementation Triage & Developer Tooling 
 
 ---
 
+## 🗺️ Roadmap & Future Vision
+
+PocketQueue is actively evolving guided by community feedback while maintaining its core tenets: single binary, zero external runtime dependencies, microsecond latency, and sub-15 MB footprint.
+
+- [ ] **MQTT over WebSockets (`ws://localhost:8080/mqtt`)**: Enable direct MQTT communication from browser frontends and client-side web apps via standard WebSocket framing.
+- [ ] **OpenTelemetry & Prometheus Metrics (`GET /metrics`)**: Native telemetry endpoint for scraping into local Prometheus or Grafana dashboards.
+- [ ] **Consumer Group Lag Visualizer**: Real-time graphical lag monitoring (high-watermark offset vs committed consumer offset) in the Charm TUI and Web Dashboard.
+- [ ] **WebAssembly (WASM) Browser Playground**: Compile the in-memory broker engine to WebAssembly to allow testing PocketQueue directly inside interactive browser sandboxes without downloading a binary.
+- [ ] **Pluggable Embedded Storage (SQLite / Pebble)**: Experimental adapter for users desiring SQL-queried historical event archives in a single `.db` file.
+- [ ] **AMQP 0-9-1 Wire Protocol Subset**: Basic queue and exchange routing compatibility for RabbitMQ microservices.
+
+Have an idea or feature request? Open an issue or join the discussion in [GitHub Issues](https://github.com/pandusatrianura/pocketqueue/issues)!
+
+---
+
 ## 🛠️ Contributing
 
 Contributions are welcome! Adding new capabilities is designed to be frictionless:
