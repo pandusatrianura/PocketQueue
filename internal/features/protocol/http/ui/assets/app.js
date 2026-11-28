@@ -207,7 +207,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (rec.decoded) {
       if (rec.decoded.kind === 'confluent_protobuf') {
-        badgeText = rec.decoded.message_name 
+        badgeText = rec.decoded.message_name
           ? `Protobuf: ${rec.decoded.message_name} (#${rec.decoded.schema_id})`
           : `Confluent Wire Format (#${rec.decoded.schema_id})`;
         badgeClass = 'badge badge-warning';
@@ -519,7 +519,7 @@ document.addEventListener('DOMContentLoaded', () => {
       let parsedVal = rawVal;
       try {
         parsedVal = JSON.parse(rawVal);
-      } catch (_) {}
+      } catch (_) { }
 
       const payload = {
         dlq_topic: dlqTopic,

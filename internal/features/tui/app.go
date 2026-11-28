@@ -868,4 +868,3 @@ func (m *AppModel) renderReplayModal() string {
 	sb.WriteString(m.replayText.View())
 	return StyleModal.Render(sb.String())
 }
-

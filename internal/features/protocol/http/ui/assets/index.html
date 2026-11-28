@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -8,15 +9,16 @@
   <link rel="stylesheet" href="/static/pico.min.css">
   <link rel="stylesheet" href="/static/app.css">
 </head>
+
 <body>
   <header>
     <div class="navbar">
       <a href="/" class="brand">
         <svg viewBox="0 0 24 24" fill="#f59e0b" stroke="#d97706" stroke-width="1.5">
-          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
         </svg>
         <span>PocketQueue</span>
-        <span class="badge badge-muted" id="badge-version">v0.8.0</span>
+        <span class="badge badge-muted" id="badge-version">v0.9.0</span>
       </a>
       <div class="nav-actions">
         <span class="badge badge-success" id="connection-status">● Live SSE</span>
@@ -41,7 +43,8 @@
           <select id="filter-topic" class="sm" style="max-width: 180px;">
             <option value="">All Topics</option>
           </select>
-          <input type="search" id="filter-search" class="sm" placeholder="Filter payload or key..." style="max-width: 240px;">
+          <input type="search" id="filter-search" class="sm" placeholder="Filter payload or key..."
+            style="max-width: 240px;">
           <button id="btn-pause" class="secondary sm">⏸ Pause</button>
           <button id="btn-clear" class="secondary sm">🧹 Clear</button>
         </div>
@@ -92,7 +95,9 @@
             </tr>
           </thead>
           <tbody id="topics-tbody">
-            <tr><td colspan="4" style="text-align: center;">Loading topic metadata...</td></tr>
+            <tr>
+              <td colspan="4" style="text-align: center;">Loading topic metadata...</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -102,7 +107,8 @@
     <section id="tab-producer" class="tab-content">
       <div class="card" style="max-width: 700px; margin: 0 auto;">
         <h3>Publish Message to Topic</h3>
-        <p style="color: var(--pico-muted); font-size: 0.9rem;">Send events directly into PocketQueue broker without writing code.</p>
+        <p style="color: var(--pico-muted); font-size: 0.9rem;">Send events directly into PocketQueue broker without
+          writing code.</p>
         <form id="form-publish">
           <div class="grid">
             <div class="form-group">
@@ -136,7 +142,9 @@
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
         <div>
           <h3>Dead-Letter Queue (DLQ) Triage</h3>
-          <p style="color: var(--pico-muted); font-size: 0.9rem;">Inspect and repair poison pill messages routed to <code>*.dlq</code> topics.</p>
+          <p style="color: var(--pico-muted); font-size: 0.9rem;">Inspect and repair poison pill messages routed to
+            <code>*.dlq</code> topics.
+          </p>
         </div>
         <button id="btn-refresh-dlq" class="secondary sm">🔄 Refresh</button>
       </div>
@@ -153,7 +161,10 @@
             </tr>
           </thead>
           <tbody id="dlq-tbody">
-            <tr><td colspan="6" style="text-align: center; color: var(--pico-muted); padding: 1.5rem;">No DLQ records found.</td></tr>
+            <tr>
+              <td colspan="6" style="text-align: center; color: var(--pico-muted); padding: 1.5rem;">No DLQ records
+                found.</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -207,4 +218,5 @@
 
   <script src="/static/app.js"></script>
 </body>
+
 </html>
